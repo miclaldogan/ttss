@@ -33,6 +33,7 @@ class ThreatTimeline:
     sequence_score: float = 0.0
     alarm_triggered: bool = False
     alarm_frames: list[int] = field(default_factory=list)
+    early_warning_flags: list[bool] = field(default_factory=list)
     threshold: float = 0.6
 
 
@@ -75,8 +76,48 @@ class PredictionModel(Protocol):
         """Predict a sequence-level threat score."""
 
 
+def _consecutive_warning_flags(
+    scores: list[float],
+    threshold: float,
+    min_run: int = 3,
+) -> list[bool]:
+    """Return a per-frame bool list flagging frames that belong to a run of
+    *min_run* or more consecutive frames all with score > *threshold*.
+
+    Args:
+        scores:    Per-frame threat scores (length T).
+        threshold: Score threshold (exclusive).
+        min_run:   Minimum consecutive frames required to trigger a flag.
+
+    Returns:
+        ``list[bool]`` of length T where ``True`` marks flagged frames.
+    """
+    flags = [False] * len(scores)
+    i = 0
+    while i < len(scores):
+        if scores[i] > threshold:
+            j = i
+            while j < len(scores) and scores[j] > threshold:
+                j += 1
+            if j - i >= min_run:
+                for k in range(i, j):
+                    flags[k] = True
+            i = j
+        else:
+            i += 1
+    return flags
+
+
 class TtssPipeline:
-    """Connect recognition, detection, and prediction layers."""
+    """Connect recognition, detection, and prediction layers.
+
+    .. note:: TorchScript traceability
+       ``TtssPipeline`` is **not** TorchScript-traceable as a whole because it
+       combines three heterogeneous ``nn.Module`` backends (YOLOv8, ViT, BiLSTM)
+       with Python-level control flow and optional cv2 I/O.  Individual
+       sub-modules (e.g. ``BiLSTMThreatPredictor``) can be traced in isolation
+       with ``torch.jit.trace`` given a fixed-shape example input.
+    """
 
     def __init__(
         self,
@@ -192,6 +233,9 @@ class TtssPipeline:
             for frame_id, score in zip(resolved_frame_ids, frame_scores, strict=True)
             if score > self.early_warning_threshold
         ]
+        early_warning_flags = _consecutive_warning_flags(
+            frame_scores, self.early_warning_threshold, min_run=3
+        )
         return ThreatTimeline(
             frame_ids=resolved_frame_ids,
             threat_scores=frame_scores,
@@ -202,6 +246,7 @@ class TtssPipeline:
             sequence_score=prediction.score,
             alarm_triggered=bool(alarm_frames),
             alarm_frames=alarm_frames,
+            early_warning_flags=early_warning_flags,
             threshold=self.early_warning_threshold,
         )
 
@@ -219,9 +264,17 @@ class TtssPipeline:
         )
         return self.predict_from_frames(frames, frame_ids=frame_ids)
 
+    def predict(self, video_path: str, frame_stride: int = 1, max_frames: int | None = None) -> ThreatTimeline:
+        """Alias for :meth:`predict_video` — run the full TTSS stack on a video file."""
+        return self.predict_video(video_path=video_path, frame_stride=frame_stride, max_frames=max_frames)
+
     def predict_from_features(
         self,
         sequence_features: Sequence[Sequence[float]] | torch.Tensor,
     ) -> ThreatPrediction:
         """Run the temporal threat model on precomputed features."""
         return self.prediction_model.predict_sequence(sequence_features)
+
+
+#: Canonical public alias — prefer ``TTPipeline`` in new code.
+TTPipeline = TtssPipeline
