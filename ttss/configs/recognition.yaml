@@ -1,5 +1,6 @@
 model:
   name: yolov8
+  model_variant: yolov8n
   weights: yolov8n.pt
   confidence_threshold: 0.25
   iou_threshold: 0.45
