@@ -24,15 +24,20 @@ VIDEO_EXTENSIONS = {".avi", ".mp4", ".mov", ".mkv"}
 def build_parser() -> argparse.ArgumentParser:
     """Build the dataset preparation CLI parser."""
     parser = argparse.ArgumentParser(description="Prepare TTSS dataset metadata.")
-    parser.add_argument("--data-root", required=True, help="Dataset root directory")
+    parser.add_argument(
+        "--smoke-test",
+        action="store_true",
+        help="Run a self-contained smoke test with synthetic data (no real videos required)",
+    )
+    parser.add_argument("--data-root", default=None, help="Dataset root directory")
     parser.add_argument(
         "--annotation-file",
-        required=True,
+        default=None,
         help="Source CSV or JSON annotations describing anomaly spans",
     )
     parser.add_argument(
         "--output-dir",
-        required=True,
+        default=None,
         help="Directory where prepared annotations will be written",
     )
     parser.add_argument(
@@ -173,9 +178,68 @@ def prepare_annotations(
     return prepared
 
 
+def run_smoke_test() -> None:
+    """Run a self-contained smoke test with 5 synthetic annotation records."""
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_root = Path(tmpdir)
+        synthetic = {
+            "videos": [
+                {
+                    "video_id": f"smoke_{i:03d}",
+                    "label": "Robbery",
+                    "fps": 30.0,
+                    "split": "train",
+                    "video_path": f"smoke_{i:03d}.mp4",
+                    "total_frames": 300,
+                    "anomaly_spans": [{"start_frame": 100, "end_frame": 150}],
+                }
+                for i in range(5)
+            ]
+        }
+        annotation_file = tmp_root / "smoke_annotations.json"
+        with annotation_file.open("w", encoding="utf-8") as fh:
+            json.dump(synthetic, fh)
+
+        labeler = TemporalThreatLabeler(pre_window=30, post_window=30)
+        prepared = prepare_annotations(
+            annotation_file=annotation_file,
+            data_root=tmp_root,
+            labeler=labeler,
+        )
+
+        if len(prepared) != 5:
+            raise AssertionError(f"Expected 5 records, got {len(prepared)}")
+        for record in prepared:
+            if "video_id" not in record:
+                raise AssertionError(f"Record missing video_id: {record}")
+
+        output_json = tmp_root / "ttss_annotations.json"
+        with output_json.open("w", encoding="utf-8") as fh:
+            json.dump({"videos": prepared}, fh, indent=2)
+
+        print(f"smoke_test=passed")
+        print(f"records_prepared={len(prepared)}")
+        print(f"annotation_json={output_json}")
+
+
 def main() -> None:
     """Run the TTSS dataset preparation scaffold."""
     args = build_parser().parse_args()
+
+    if args.smoke_test:
+        run_smoke_test()
+        return
+
+    missing = [f"--{flag}" for flag, val in [
+        ("data-root", args.data_root),
+        ("annotation-file", args.annotation_file),
+        ("output-dir", args.output_dir),
+    ] if val is None]
+    if missing:
+        build_parser().error(f"the following arguments are required: {', '.join(missing)}")
+
     data_root = Path(args.data_root).resolve()
     output_dir = Path(args.output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
