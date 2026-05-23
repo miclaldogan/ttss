@@ -1,9 +1,11 @@
 model:
   name: bilstm-threat
-  input_dim: 770
-  hidden_dim: 256
+  input_dim: 1536          # fused YOLO-8 + ViT-768 × 2
+  hidden_size: 256         # BiLSTM hidden units per direction
+  hidden_dim: 256          # alias for backwards compat
   num_layers: 2
   dropout: 0.1
+  seq_len: 16              # expected temporal sequence length during training
   bidirectional: true
 
 inference:
