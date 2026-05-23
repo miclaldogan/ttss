@@ -128,3 +128,49 @@ def test_temporal_losses_return_positive_scalars() -> None:
     assert smoothness.item() >= 0.0
     assert regression.item() > 0.0
     assert precrime.item() > 0.0
+
+
+def test_ucf_crime_dataset_sample_structure() -> None:
+    from ttss.data.temporal_labeler import TemporalSpan
+    from ttss.data.ucf_crime import AnnotationRecord, UcfCrimeDataset
+
+    annotations = [
+        AnnotationRecord(
+            video_id="test_video_001",
+            label="Robbery",
+            fps=30.0,
+            split="train",
+            video_path="test_video_001.mp4",
+            anomaly_spans=[TemporalSpan(start_frame=50, end_frame=100)],
+            total_frames=200,
+        )
+    ]
+    dataset = UcfCrimeDataset(
+        annotations=annotations,
+        data_root="/tmp",
+        load_frames=False,
+    )
+
+    assert len(dataset) == 1
+
+    sample = dataset[0]
+
+    # Identity checks
+    assert sample.annotation.video_id == "test_video_001"
+    assert sample.annotation.label == "Robbery"
+
+    # Shape: all per-frame lists must have length == total_frames
+    assert len(sample.frame_indices) == 200
+    assert len(sample.temporal_labels) == 200
+    assert len(sample.threat_scores) == 200
+
+    # All scores must be in [0, 1]
+    assert all(0.0 <= s <= 1.0 for s in sample.threat_scores)
+
+    # The three threat zones must be present
+    assert "pre_crime" in sample.temporal_labels
+    assert "crime" in sample.temporal_labels
+    assert "post_crime" in sample.temporal_labels
+
+    # Frames list is empty when load_frames=False
+    assert sample.frames == []
