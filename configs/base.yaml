@@ -1,0 +1,31 @@
+experiment:
+  name: ttss-baseline
+  seed: 42
+  output_dir: outputs/ttss
+
+data:
+  dataset_name: UCF-Crime
+  data_root: data
+  raw_dir: data/raw/UCF-Crime
+  processed_dir: data/processed/UCF-Crime
+  videos_dir: data/raw/UCF-Crime/videos
+  annotations_source: data/raw/UCF-Crime/source_annotations.csv
+  prepared_annotations_json: data/processed/UCF-Crime/ttss_annotations.json
+  prepared_annotations_csv: data/processed/UCF-Crime/ttss_annotations.csv
+  fps: 30
+  frame_stride: 4
+  clip_length: 32
+  pre_window: 90
+  post_window: 90
+  post_decay: 5.0
+
+training:
+  batch_size: 8
+  epochs: 20
+  learning_rate: 0.0001
+  weight_decay: 0.00001
+  device: cpu
+
+logging:
+  use_wandb: false
+  project: ttss

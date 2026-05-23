@@ -1,0 +1,16 @@
+ultralytics
+torch
+torchvision
+transformers
+einops
+timm
+scikit-learn
+opencv-python
+numpy
+pandas
+matplotlib
+seaborn
+wandb
+tqdm
+pyyaml
+pytest

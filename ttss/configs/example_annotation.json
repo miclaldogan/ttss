@@ -1,0 +1,79 @@
+{
+  "videos": [
+    {
+      "video_id": "Abuse001_x264",
+      "label": "Abuse",
+      "split": "train",
+      "video_path": "videos/Abuse/Abuse001_x264.mp4",
+      "fps": 30.0,
+      "total_frames": 360,
+      "anomaly_spans": [
+        {
+          "start_frame": 120,
+          "end_frame": 180
+        }
+      ],
+      "segments": {
+        "pre_crime": {
+          "start_frame": 30,
+          "end_frame": 119
+        },
+        "crime": {
+          "start_frame": 120,
+          "end_frame": 180
+        },
+        "post_crime": {
+          "start_frame": 181,
+          "end_frame": 270
+        }
+      },
+      "frame_labels": [
+        {
+          "frame_index": 30,
+          "label": "pre_crime",
+          "threat_score": 0.0
+        },
+        {
+          "frame_index": 75,
+          "label": "pre_crime",
+          "threat_score": 0.25
+        },
+        {
+          "frame_index": 119,
+          "label": "pre_crime",
+          "threat_score": 0.494444
+        },
+        {
+          "frame_index": 120,
+          "label": "crime",
+          "threat_score": 0.508197
+        },
+        {
+          "frame_index": 150,
+          "label": "crime",
+          "threat_score": 0.754098
+        },
+        {
+          "frame_index": 180,
+          "label": "crime",
+          "threat_score": 1.0
+        },
+        {
+          "frame_index": 181,
+          "label": "post_crime",
+          "threat_score": 0.945959
+        },
+        {
+          "frame_index": 225,
+          "label": "post_crime",
+          "threat_score": 0.082085
+        },
+        {
+          "frame_index": 320,
+          "label": "normal",
+          "threat_score": 0.0
+        }
+      ]
+    }
+  ]
+}

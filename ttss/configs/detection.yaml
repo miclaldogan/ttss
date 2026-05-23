@@ -1,0 +1,10 @@
+model:
+  name: vit-b16-scene
+  backbone: vit_base_patch16_224
+  pretrained: true
+  image_size: 224
+  device: cpu
+
+features:
+  embedding_dim: 768
+  pooling: cls

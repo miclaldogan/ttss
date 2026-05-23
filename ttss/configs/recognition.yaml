@@ -1,0 +1,14 @@
+model:
+  name: yolov8
+  weights: yolov8n.pt
+  confidence_threshold: 0.25
+  iou_threshold: 0.45
+  device: cpu
+
+features:
+  max_detections: 20
+  include_classes:
+    - person
+    - car
+    - bicycle
+    - knife
