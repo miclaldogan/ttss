@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import pytest
 
-from ttss.data.temporal_labeler import CRIME_LABEL, PRE_CRIME_LABEL, TemporalThreatLabeler
+from ttss.data.temporal_labeler import (
+    CRIME_LABEL,
+    POST_CRIME_LABEL,
+    PRE_CRIME_LABEL,
+    TemporalThreatLabeler,
+)
 
 
 def test_normal_video_frames_have_zero_threat_score() -> None:
@@ -61,3 +66,20 @@ def test_pre_crime_scores_increase_linearly() -> None:
     assert all(delta > 0.0 for delta in deltas)
     assert all(delta == pytest.approx(deltas[0]) for delta in deltas[1:])
     assert labels[10].label == CRIME_LABEL
+
+
+def test_post_crime_scores_decrease_exponentially() -> None:
+    labeler = TemporalThreatLabeler(pre_window=5, post_window=10)
+
+    labels = labeler.label_video(total_frames=40, crime_start_frame=10, crime_end_frame=15)
+    post_crime_labels = [item for item in labels if item.label == POST_CRIME_LABEL]
+
+    assert len(post_crime_labels) == 10
+    scores = [item.threat_score for item in post_crime_labels]
+
+    # Scores must be strictly decreasing.
+    assert all(left > right for left, right in zip(scores, scores[1:]))
+
+    # Exponential decay: consecutive ratios must be constant.
+    ratios = [b / a for a, b in zip(scores, scores[1:])]
+    assert all(r == pytest.approx(ratios[0], rel=1e-6) for r in ratios[1:])
