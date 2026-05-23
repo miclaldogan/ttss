@@ -7,11 +7,14 @@ the range [0, 1] using a bidirectional LSTM and temporal attention.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import Sequence
 
 import torch
 import torch.nn as nn
+
+_logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -75,6 +78,7 @@ class BiLSTMThreatPredictor(nn.Module):
         self.input_projection = nn.Linear(input_dim, projection_dim)
         self.projection_norm = nn.LayerNorm(projection_dim)
         self.lstm = nn.LSTM(
+            # two layers of BiLSTM: hidden_dim*2 output at each time step
             input_size=projection_dim,
             hidden_size=hidden_dim,
             num_layers=num_layers,
@@ -91,16 +95,36 @@ class BiLSTMThreatPredictor(nn.Module):
         )
         self.output_activation = nn.Sigmoid()
 
+        n_params = sum(p.numel() for p in self.parameters())
+        _logger.info(
+            "BiLSTMThreatPredictor initialised: input_dim=%d hidden_dim=%d "
+            "num_layers=%d params=%d",
+            input_dim, hidden_dim, num_layers, n_params,
+        )
+
     def forward(
         self,
         sequence_features: torch.Tensor,
         mask: torch.Tensor | None = None,
-    ) -> ThreatPrediction:
+        return_attention: bool = False,
+    ) -> ThreatPrediction | tuple[torch.Tensor, torch.Tensor]:
         """Predict per-frame threat scores from a fused feature tensor.
 
         Args:
-            sequence_features: Tensor of shape (B, T, F) or (T, F).
-            mask: Optional boolean tensor of shape (B, T) marking valid steps.
+            sequence_features: Tensor of shape ``(B, T, F)`` or ``(T, F)``
+                where F is the fused feature dimension (e.g. 1536 for
+                YOLO-8 + ViT-768 × 2).
+            mask: Optional boolean tensor of shape ``(B, T)`` marking valid
+                time steps (True = keep).
+            return_attention: When ``True``, return a ``(frame_scores, attn)``
+                tuple instead of a :class:`ThreatPrediction` object, where
+                ``frame_scores`` has shape ``(B, T)`` and ``attn`` has shape
+                ``(B, T)``.  Useful for inspection and visualisation.
+
+        Returns:
+            :class:`ThreatPrediction` (default) or
+            ``tuple[Tensor[B, T], Tensor[B, T]]`` when *return_attention* is
+            ``True``.
         """
         if sequence_features.ndim == 2:
             sequence_features = sequence_features.unsqueeze(0)
@@ -114,6 +138,10 @@ class BiLSTMThreatPredictor(nn.Module):
         logits = self.output_projection(torch.cat([hidden_states, expanded_context], dim=-1))
         frame_scores = self.output_activation(logits).squeeze(-1)
         sequence_score = torch.sum(frame_scores * attention_weights, dim=-1)
+
+        if return_attention:
+            return frame_scores, attention_weights
+
         return ThreatPrediction(
             frame_scores=frame_scores,
             sequence_score=sequence_score,
