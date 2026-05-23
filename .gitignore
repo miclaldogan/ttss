@@ -34,7 +34,7 @@ Thumbs.db
 # PyTorch and model artifacts
 checkpoints/
 weights/
-models/
+/models/
 *.pt
 *.pth
 *.ckpt
