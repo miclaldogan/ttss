@@ -7,7 +7,7 @@ import torch
 from ttss.models.detection.vit_scene import SceneEmbedding
 from ttss.models.prediction.bilstm_threat import BiLSTMThreatPredictor, ThreatPrediction
 from ttss.models.recognition.yolov8_wrapper import Detection, DetectionBox
-from ttss.models.ttss_pipeline import TtssPipeline
+from ttss.models.ttss_pipeline import TtssPipeline, TTPipeline, _consecutive_warning_flags
 from ttss.training.losses import (
     PreCrimeDetectionLoss,
     TemporalConsistencyLoss,
@@ -174,3 +174,151 @@ def test_ucf_crime_dataset_sample_structure() -> None:
 
     # Frames list is empty when load_frames=False
     assert sample.frames == []
+
+
+# ---------------------------------------------------------------------------
+# TTPipeline alias
+# ---------------------------------------------------------------------------
+
+
+def test_ttpipeline_alias_is_same_class() -> None:
+    assert TTPipeline is TtssPipeline
+
+
+def test_ttpipeline_has_predict_method() -> None:
+    assert callable(getattr(TTPipeline, "predict", None))
+
+
+# ---------------------------------------------------------------------------
+# early_warning_flags — consecutive logic
+# ---------------------------------------------------------------------------
+
+
+def test_consecutive_flags_three_in_a_row() -> None:
+    """3 consecutive frames above threshold must all be flagged."""
+    scores = [0.2, 0.7, 0.8, 0.9, 0.3]
+    flags = _consecutive_warning_flags(scores, threshold=0.6, min_run=3)
+    assert flags == [False, True, True, True, False]
+
+
+def test_consecutive_flags_two_not_enough() -> None:
+    """A run of only 2 consecutive frames must NOT be flagged."""
+    scores = [0.7, 0.8, 0.3, 0.2]
+    flags = _consecutive_warning_flags(scores, threshold=0.6, min_run=3)
+    assert flags == [False, False, False, False]
+
+
+def test_consecutive_flags_exactly_three() -> None:
+    scores = [0.7, 0.8, 0.9]
+    flags = _consecutive_warning_flags(scores, threshold=0.6, min_run=3)
+    assert flags == [True, True, True]
+
+
+def test_consecutive_flags_disjoint_runs() -> None:
+    """Two separate short runs must not be merged."""
+    scores = [0.7, 0.8, 0.2, 0.7, 0.8]
+    flags = _consecutive_warning_flags(scores, threshold=0.6, min_run=3)
+    assert flags == [False, False, False, False, False]
+
+
+def test_consecutive_flags_long_run() -> None:
+    scores = [0.1, 0.8, 0.9, 0.7, 0.8, 0.9, 0.1]
+    flags = _consecutive_warning_flags(scores, threshold=0.6, min_run=3)
+    assert flags == [False, True, True, True, True, True, False]
+
+
+def test_consecutive_flags_all_below() -> None:
+    scores = [0.1, 0.2, 0.3]
+    flags = _consecutive_warning_flags(scores, threshold=0.6, min_run=3)
+    assert flags == [False, False, False]
+
+
+def test_consecutive_flags_empty() -> None:
+    assert _consecutive_warning_flags([], 0.6) == []
+
+
+# ---------------------------------------------------------------------------
+# early_warning_flags populated on ThreatTimeline
+# ---------------------------------------------------------------------------
+
+
+class DummyPredictionModelHigh:
+    """Returns 5 consecutive high scores for early-warning tests."""
+
+    def predict_sequence(
+        self,
+        sequence_features: "Sequence[Sequence[float]] | torch.Tensor",
+    ) -> ThreatPrediction:
+        T = 5
+        scores = torch.tensor([[0.8] * T], dtype=torch.float32)
+        attn = torch.ones(1, T) / T
+        return ThreatPrediction(
+            frame_scores=scores,
+            sequence_score=torch.tensor([0.8]),
+            attention_weights=attn,
+            hidden_state=torch.empty(0),
+        )
+
+
+def test_threat_timeline_has_early_warning_flags_field() -> None:
+    pipeline = TtssPipeline(
+        recognition_model=DummyRecognitionModel(),
+        detection_model=DummyDetectionModel(),
+        prediction_model=DummyPredictionModelHigh(),
+        early_warning_threshold=0.6,
+    )
+    timeline = pipeline.predict_from_frames([object()] * 5)
+    assert hasattr(timeline, "early_warning_flags")
+    assert len(timeline.early_warning_flags) == 5
+
+
+def test_early_warning_flags_all_true_for_high_scores() -> None:
+    pipeline = TtssPipeline(
+        recognition_model=DummyRecognitionModel(),
+        detection_model=DummyDetectionModel(),
+        prediction_model=DummyPredictionModelHigh(),
+        early_warning_threshold=0.6,
+    )
+    timeline = pipeline.predict_from_frames([object()] * 5)
+    assert all(timeline.early_warning_flags)
+
+
+def test_early_warning_flags_false_for_two_frame_run() -> None:
+    """Pipeline with only 2 high-score frames must not raise early warning flags."""
+
+    class Two:
+        def predict_sequence(self, seq):
+            scores = torch.tensor([[0.8, 0.9]], dtype=torch.float32)
+            attn = torch.tensor([[0.5, 0.5]])
+            return ThreatPrediction(
+                frame_scores=scores,
+                sequence_score=torch.tensor([0.85]),
+                attention_weights=attn,
+                hidden_state=torch.empty(0),
+            )
+
+    pipeline = TtssPipeline(
+        recognition_model=DummyRecognitionModel(),
+        detection_model=DummyDetectionModel(),
+        prediction_model=Two(),
+        early_warning_threshold=0.6,
+    )
+    timeline = pipeline.predict_from_frames([object()] * 2)
+    assert timeline.early_warning_flags == [False, False]
+
+
+# ---------------------------------------------------------------------------
+# demo.py arg parsing
+# ---------------------------------------------------------------------------
+
+
+def test_demo_parser_accepts_video_flag() -> None:
+    from ttss.scripts.demo import build_parser
+    args = build_parser().parse_args(["--video", "sample.mp4"])
+    assert args.video == "sample.mp4"
+
+
+def test_demo_parser_default_threshold() -> None:
+    from ttss.scripts.demo import build_parser
+    args = build_parser().parse_args(["--video", "x.mp4"])
+    assert args.threshold == 0.6
