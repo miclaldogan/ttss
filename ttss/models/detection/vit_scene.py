@@ -36,7 +36,20 @@ class SceneEmbedding:
 
 
 class VitSceneEncoder(nn.Module):
-    """Vision Transformer scene encoder used by the detection layer."""
+    """Vision Transformer scene encoder used by the detection layer.
+
+    The CLS (classification) token is used as the frame-level scene
+    representation because it aggregates global context from all patch tokens
+    via self-attention.  Unlike spatial pooling strategies (e.g. mean-pooling
+    all patch tokens), the CLS token is explicitly trained to summarise the
+    full image into a single fixed-size vector, making it well-suited as a
+    scene descriptor for downstream temporal threat modelling.
+
+    Architecture:  ViT-B/16 (12 attention blocks, 12 heads, d_model=768)
+    Pretrained:    ImageNet-21k then fine-tuned on ImageNet-1k (timm default)
+    Input shape:   ``(B, 3, 224, 224)``  — ImageNet-normalised RGB
+    Output shape:  ``(B, 768)``          — L2-unnormalised CLS embedding
+    """
 
     def __init__(
         self,
@@ -46,6 +59,7 @@ class VitSceneEncoder(nn.Module):
         pretrained: bool = True,
         image_size: int = 224,
         backend: str = "timm",
+        freeze_backbone: bool = False,
         model: nn.Module | None = None,
     ) -> None:
         super().__init__()
@@ -55,28 +69,46 @@ class VitSceneEncoder(nn.Module):
         self.pretrained = pretrained
         self.image_size = image_size
         self.backend = backend
+        self.freeze_backbone = freeze_backbone
         self.model = model
 
     def load(self) -> None:
         """Instantiate the configured ViT backend on demand."""
         if self.model is not None:
             self.model.to(self.device)
-            return
-
-        if self.backend == "timm":
-            if timm is None:
-                raise RuntimeError("timm is required for the timm ViT backend")
-            self.model = timm.create_model(self.model_name, pretrained=self.pretrained)
-        elif self.backend == "transformers":
-            if ViTModel is None:
-                raise RuntimeError(
-                    "transformers is required for the Hugging Face ViT backend"
-                )
-            self.model = ViTModel.from_pretrained("google/vit-base-patch16-224")
         else:
-            raise ValueError(f"Unsupported backend: {self.backend}")
+            if self.backend == "timm":
+                if timm is None:
+                    raise RuntimeError("timm is required for the timm ViT backend")
+                self.model = timm.create_model(self.model_name, pretrained=self.pretrained)
+            elif self.backend == "transformers":
+                if ViTModel is None:
+                    raise RuntimeError(
+                        "transformers is required for the Hugging Face ViT backend"
+                    )
+                self.model = ViTModel.from_pretrained("google/vit-base-patch16-224")
+            else:
+                raise ValueError(f"Unsupported backend: {self.backend}")
+            self.model.to(self.device)
 
-        self.model.to(self.device)
+        if self.freeze_backbone:
+            self.freeze()
+
+    def freeze(self) -> None:
+        """Freeze all backbone parameters (inference-only mode)."""
+        if self.model is None:
+            raise RuntimeError("Call load() before freeze()")
+        for param in self.model.parameters():
+            param.requires_grad_(False)
+        self.model.eval()
+
+    def unfreeze(self) -> None:
+        """Unfreeze all backbone parameters (fine-tuning mode)."""
+        if self.model is None:
+            raise RuntimeError("Call load() before unfreeze()")
+        for param in self.model.parameters():
+            param.requires_grad_(True)
+        self.model.train()
 
     def forward(self, frames: torch.Tensor) -> torch.Tensor:
         """Encode a batch of frames and return CLS embeddings of shape (B, 768)."""

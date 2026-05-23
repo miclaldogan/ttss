@@ -1,10 +1,13 @@
 model:
   name: vit-b16-scene
   backbone: vit_base_patch16_224
+  pretrained_tag: "vit_base_patch16_224.augreg2_in21k_ft_in1k"  # ImageNet-21k pretrained
   pretrained: true
-  image_size: 224
+  img_size: 224
+  image_size: 224  # alias kept for backwards compat
   device: cpu
+  freeze_backbone: false  # set true for inference-only / feature extraction
 
 features:
   embedding_dim: 768
-  pooling: cls
+  pooling: cls  # CLS token — global scene context aggregated via self-attention
