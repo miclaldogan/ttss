@@ -66,6 +66,8 @@ class BiLSTMThreatPredictor(nn.Module):
         num_layers: int = 2,
         dropout: float = 0.1,
         output_dim: int = 1,
+        bidirectional: bool = True,
+        use_attention: bool = True,
     ) -> None:
         super().__init__()
         self.input_dim = input_dim
@@ -74,21 +76,29 @@ class BiLSTMThreatPredictor(nn.Module):
         self.num_layers = num_layers
         self.dropout = dropout
         self.output_dim = output_dim
+        self.bidirectional = bidirectional
+        self.use_attention = use_attention
+
+        lstm_out_dim = hidden_dim * 2 if bidirectional else hidden_dim
 
         self.input_projection = nn.Linear(input_dim, projection_dim)
         self.projection_norm = nn.LayerNorm(projection_dim)
         self.lstm = nn.LSTM(
-            # two layers of BiLSTM: hidden_dim*2 output at each time step
             input_size=projection_dim,
             hidden_size=hidden_dim,
             num_layers=num_layers,
             dropout=dropout if num_layers > 1 else 0.0,
             batch_first=True,
-            bidirectional=True,
+            bidirectional=bidirectional,
         )
-        self.attention = TemporalAttention(hidden_dim * 2)
+        if use_attention:
+            self.attention: nn.Module | None = TemporalAttention(lstm_out_dim)
+            proj_in_dim = lstm_out_dim * 2
+        else:
+            self.attention = None
+            proj_in_dim = lstm_out_dim
         self.output_projection = nn.Sequential(
-            nn.Linear(hidden_dim * 4, hidden_dim),
+            nn.Linear(proj_in_dim, hidden_dim),
             nn.GELU(),
             nn.Dropout(dropout),
             nn.Linear(hidden_dim, output_dim),
@@ -98,8 +108,8 @@ class BiLSTMThreatPredictor(nn.Module):
         n_params = sum(p.numel() for p in self.parameters())
         _logger.info(
             "BiLSTMThreatPredictor initialised: input_dim=%d hidden_dim=%d "
-            "num_layers=%d params=%d",
-            input_dim, hidden_dim, num_layers, n_params,
+            "num_layers=%d bidirectional=%s use_attention=%s params=%d",
+            input_dim, hidden_dim, num_layers, bidirectional, use_attention, n_params,
         )
 
     def forward(
@@ -133,11 +143,21 @@ class BiLSTMThreatPredictor(nn.Module):
 
         projected = self.projection_norm(self.input_projection(sequence_features))
         hidden_states, _ = self.lstm(projected)
-        attention_weights, context = self.attention(hidden_states, mask=mask)
-        expanded_context = context.unsqueeze(1).expand(-1, hidden_states.size(1), -1)
-        logits = self.output_projection(torch.cat([hidden_states, expanded_context], dim=-1))
-        frame_scores = self.output_activation(logits).squeeze(-1)
-        sequence_score = torch.sum(frame_scores * attention_weights, dim=-1)
+        if self.use_attention:
+            assert self.attention is not None
+            attention_weights, context = self.attention(hidden_states, mask=mask)
+            expanded_context = context.unsqueeze(1).expand(-1, hidden_states.size(1), -1)
+            logits = self.output_projection(
+                torch.cat([hidden_states, expanded_context], dim=-1)
+            )
+            frame_scores = self.output_activation(logits).squeeze(-1)
+            sequence_score = torch.sum(frame_scores * attention_weights, dim=-1)
+        else:
+            T_len = hidden_states.size(1)
+            attention_weights = hidden_states.new_ones(hidden_states.size(0), T_len) / T_len
+            logits = self.output_projection(hidden_states)
+            frame_scores = self.output_activation(logits).squeeze(-1)
+            sequence_score = frame_scores.mean(dim=-1)
 
         if return_attention:
             return frame_scores, attention_weights
@@ -160,11 +180,12 @@ class BiLSTMThreatPredictor(nn.Module):
         else:
             if not sequence_features:
                 empty = torch.empty((1, 0), dtype=torch.float32)
+                lstm_out_dim = self.hidden_dim * 2 if self.bidirectional else self.hidden_dim
                 return ThreatPrediction(
                     frame_scores=empty,
                     sequence_score=torch.zeros(1, dtype=torch.float32),
                     attention_weights=empty,
-                    hidden_state=torch.empty((1, 0, self.hidden_dim * 2)),
+                    hidden_state=torch.empty((1, 0, lstm_out_dim)),
                 )
             tensor = torch.tensor(sequence_features, dtype=torch.float32)
         return self.forward(tensor, mask=mask)
