@@ -13,10 +13,15 @@ import torch.nn as nn
 
 
 class TemporalConsistencyLoss(nn.Module):
-    """Penalize abrupt changes between consecutive frame scores."""
+    """Penalize abrupt changes between consecutive frame scores.
 
-    def __init__(self, reduction: str = "mean", p: int = 1) -> None:
+    Only differences **greater than** *delta* are penalised, giving the model
+    tolerance for small frame-to-frame fluctuations.
+    """
+
+    def __init__(self, delta: float = 0.0, reduction: str = "mean", p: int = 1) -> None:
         super().__init__()
+        self.delta = delta
         self.reduction = reduction
         self.p = p
 
@@ -26,6 +31,8 @@ class TemporalConsistencyLoss(nn.Module):
         if scores.size(-1) < 2:
             return scores.new_tensor(0.0)
         deltas = torch.diff(scores, dim=-1).abs()
+        if self.delta > 0.0:
+            deltas = torch.clamp(deltas - self.delta, min=0.0)
         if self.p == 2:
             deltas = deltas.pow(2)
         if self.reduction == "sum":
@@ -114,11 +121,25 @@ def temporal_consistency_loss(scores: Sequence[float]) -> float:
 def composite_threat_loss(
     predictions: Sequence[float],
     targets: Sequence[float],
-    consistency_weight: float = 0.1,
+    lambda1: float = 1.0,
+    lambda2: float = 0.1,
+    consistency_weight: float | None = None,
 ) -> float:
-    """Combine regression loss with a temporal smoothness prior."""
+    """Combine regression loss with a temporal smoothness prior.
+
+    ``L = λ1 * regression + λ2 * consistency``
+
+    Args:
+        predictions:       Per-frame predicted threat scores.
+        targets:           Per-frame ground-truth threat scores.
+        lambda1:           Weight for the regression term (default 1.0).
+        lambda2:           Weight for the consistency term (default 0.1).
+        consistency_weight: Deprecated alias for *lambda2*; takes precedence
+                            when provided for backwards compatibility.
+    """
+    lam2 = consistency_weight if consistency_weight is not None else lambda2
     prediction_tensor = torch.tensor(predictions, dtype=torch.float32)
     target_tensor = torch.tensor(targets, dtype=torch.float32)
     regression = ThreatScoreRegressionLoss()(prediction_tensor, target_tensor)
     smoothness = TemporalConsistencyLoss()(prediction_tensor)
-    return float((regression + (consistency_weight * smoothness)).item())
+    return float((lambda1 * regression + lam2 * smoothness).item())
