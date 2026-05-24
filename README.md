@@ -144,14 +144,16 @@ python scripts/infer.py \
 
 ## Benchmark Placeholder
 
-| Model Variant | Backbone(s) | AUC-ROC | EAR | MALT (frames) | AP (pre-crime) | Notes |
+| Model / Baseline | Backbone(s) | AUC-ROC | EAR | MALT (frames) | AP (pre-crime) | Notes |
 | --- | --- | ---: | ---: | ---: | ---: | --- |
-| TTSS-YOLOv8-ViT-BiLSTM | YOLOv8 + ViT-B/16 + BiLSTM | TBA | TBA | TBA | TBA | Main model |
+| **TTSS-YOLOv8-ViT-BiLSTM** | YOLOv8 + ViT-B/16 + BiLSTM | TBA | TBA | TBA | TBA | Main model |
 | TTSS w/o Recognition Layer | ViT-B/16 + BiLSTM | TBA | TBA | TBA | TBA | Ablation |
 | TTSS w/o Temporal Labels | YOLOv8 + ViT-B/16 + BiLSTM | TBA | TBA | TBA | TBA | Ablation |
-| Classical Anomaly Baseline | TBD | TBA | TBA | TBA | TBA | Baseline |
+| Sultani et al. (2018) | C3D + MIL | TBA | TBA | — | — | Baseline |
+| RTFM (Tian et al., 2021) | I3D + Feature Magnitude | TBA | TBA | — | — | Baseline |
+| Mean ViT + SVM | ViT-B/16 + OneClassSVM | TBA | TBA | — | — | Baseline |
 
-> **Metrics**: AUC-ROC = frame-level area under the ROC curve; EAR = Early Alert Rate (fraction of pre-crime frames exceeding the alert threshold); MALT = Mean Alert Lead Time in frames; AP = Average Precision on pre-crime frames. Results will be populated after training on UCF-Crime.
+> **Metrics**: AUC-ROC = frame-level area under the ROC curve; EAR = Early Alert Rate (fraction of pre-crime frames exceeding the alert threshold); MALT = Mean Alert Lead Time in frames; AP = Average Precision on pre-crime frames. Baselines use only AUC-ROC and EAR (they do not produce temporal labeling). Results will be populated after training on UCF-Crime. See [docs/baselines.md](docs/baselines.md) for checkpoint URLs and reproduction steps.
 
 ## Testing
 
