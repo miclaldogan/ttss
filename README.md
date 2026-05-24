@@ -28,7 +28,7 @@ flowchart LR
     C --> E[Feature fusion]
     D --> E
     E --> F[Prediction Layer\nBiLSTM temporal modeling]
-    F --> G[Threat score in [0.0, 1.0]]
+    F --> G["Threat score in [0.0, 1.0]"]
     G --> H[Temporal labels\npre-crime / crime / post-crime]
 ```
 

@@ -138,8 +138,14 @@ def composite_threat_loss(
                             when provided for backwards compatibility.
     """
     lam2 = consistency_weight if consistency_weight is not None else lambda2
-    prediction_tensor = torch.tensor(predictions, dtype=torch.float32)
-    target_tensor = torch.tensor(targets, dtype=torch.float32)
+    if isinstance(predictions, torch.Tensor):
+        prediction_tensor = predictions.detach().clone().float()
+    else:
+        prediction_tensor = torch.tensor(predictions, dtype=torch.float32)
+    if isinstance(targets, torch.Tensor):
+        target_tensor = targets.detach().clone().float()
+    else:
+        target_tensor = torch.tensor(targets, dtype=torch.float32)
     regression = ThreatScoreRegressionLoss()(prediction_tensor, target_tensor)
     smoothness = TemporalConsistencyLoss()(prediction_tensor)
     return float((lambda1 * regression + lam2 * smoothness).item())
