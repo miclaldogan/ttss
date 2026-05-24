@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Sequence
 
+import numpy as np
+
 
 def binary_f1_score(y_true: Sequence[int], y_pred: Sequence[int]) -> float:
     """Compute F1 score for binary predictions without external dependencies."""
@@ -82,3 +84,88 @@ def threshold_predictions(
 ) -> list[int]:
     """Convert continuous threat scores to binary decisions."""
     return [1 if score >= threshold else 0 for score in scores]
+
+
+# ---------------------------------------------------------------------------
+# Numpy-signature evaluation metrics (issue #8)
+# All accept (y_true: np.ndarray, y_score: np.ndarray) as primary signature.
+# ---------------------------------------------------------------------------
+
+
+def frame_level_auc(y_true: np.ndarray, y_score: np.ndarray) -> float:
+    """AUC-ROC: threat_score vs binary crime label.
+
+    y_true: 1 for crime frames, 0 otherwise.
+    Uses pairwise ranking — equivalent to sklearn's roc_auc_score.
+    """
+    y_true = np.asarray(y_true)
+    y_score = np.asarray(y_score, dtype=float)
+    positives = y_score[y_true == 1]
+    negatives = y_score[y_true == 0]
+    if len(positives) == 0 or len(negatives) == 0:
+        return 0.0
+    concordant = float(np.sum(positives[:, None] > negatives[None, :])) + 0.5 * float(
+        np.sum(positives[:, None] == negatives[None, :])
+    )
+    return concordant / (len(positives) * len(negatives))
+
+
+def early_alert_rate(
+    y_true: np.ndarray,
+    y_score: np.ndarray,
+    threshold: float = 0.5,
+) -> float:
+    """Early Alert Rate (EAR): fraction of pre-crime frames where score >= threshold.
+
+    Pre-crime frames are those before the first crime onset derived from y_true.
+    y_true: 1 for crime frames, 0 otherwise.
+    """
+    y_true = np.asarray(y_true)
+    y_score = np.asarray(y_score, dtype=float)
+    onset_indices = np.where(y_true == 1)[0]
+    if len(onset_indices) == 0 or onset_indices[0] == 0:
+        return 0.0
+    onset = int(onset_indices[0])
+    return float(np.mean(y_score[:onset] >= threshold))
+
+
+def mean_alert_lead_time(
+    y_true: np.ndarray,
+    y_score: np.ndarray,
+    threshold: float = 0.5,
+) -> float:
+    """Mean Alert Lead Time (MALT): frames between the first pre-crime alert and crime onset.
+
+    y_true: 1 for crime frames, 0 otherwise.
+    Returns 0.0 when no alert fires before onset.
+    """
+    y_true = np.asarray(y_true)
+    y_score = np.asarray(y_score, dtype=float)
+    onset_indices = np.where(y_true == 1)[0]
+    if len(onset_indices) == 0 or onset_indices[0] == 0:
+        return 0.0
+    onset = int(onset_indices[0])
+    pre_alerts = np.where(y_score[:onset] >= threshold)[0]
+    if len(pre_alerts) == 0:
+        return 0.0
+    return float(onset - int(pre_alerts[0]))
+
+
+def precrime_ap(y_true: np.ndarray, y_score: np.ndarray) -> float:
+    """Average Precision (AP) for pre-crime frame detection.
+
+    y_true: 1 for pre-crime frames, 0 otherwise.
+    Computes the area under the precision-recall curve via the standard
+    step-interpolated formula: AP = sum_k P(k) * ΔR(k).
+    """
+    y_true = np.asarray(y_true)
+    y_score = np.asarray(y_score, dtype=float)
+    n_positive = int(np.sum(y_true))
+    if n_positive == 0:
+        return 0.0
+    sorted_idx = np.argsort(y_score)[::-1]
+    y_sorted = y_true[sorted_idx]
+    tp_cumsum = np.cumsum(y_sorted).astype(float)
+    precision_at_k = tp_cumsum / (np.arange(len(y_true), dtype=float) + 1.0)
+    # sum precision only at positions where a positive is retrieved
+    return float(np.sum(precision_at_k[y_sorted == 1]) / n_positive)
