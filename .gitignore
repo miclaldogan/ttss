@@ -60,3 +60,8 @@ mlruns/
 # Logs
 logs/
 *.log
+
+# Local large artifacts — not for version control
+offline_wheels/
+outputs/
+runs/
