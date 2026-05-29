@@ -35,14 +35,15 @@ class TrainerConfig:
     epochs: int = 20
     learning_rate: float = 1e-4
     weight_decay: float = 1e-5
-    batch_size: int = 8
+    batch_size: int = 4
     max_grad_norm: float = 1.0
     lambda1: float = 1.0            # regression loss weight
     lambda2: float = 0.1            # consistency loss weight
+    vit_lr_scale: float = 0.1       # ViT fine-tune LR = learning_rate * vit_lr_scale
     use_wandb: bool = False
     wandb_project: str = "ttss"
     checkpoint_dir: str = "checkpoints"
-    mixed_precision: bool = False   # requires CUDA; auto-disabled on CPU
+    mixed_precision: bool = True    # auto-disabled when not on CUDA
     dry_run: bool = False
     dry_run_steps: int = 2
 
@@ -123,8 +124,35 @@ class TTSSTrainer:
         self._best_val_auc: float = 0.0
         self._wandb_run: Any = None
 
+        # Differential LR: ViT fine-tune blocks use vit_lr_scale × base LR.
+        # Detected by checking whether the model has a .vit attribute with
+        # trainable parameters (i.e. EndToEndThreatModel usage).
+        vit_trainable = []
+        vit_module = getattr(model, "vit", None)
+        if vit_module is not None:
+            vit_trainable = [p for p in vit_module.parameters() if p.requires_grad]
+
+        if vit_trainable:
+            vit_param_ids = {id(p) for p in vit_trainable}
+            bilstm_params = [
+                p for p in model.parameters()
+                if p.requires_grad and id(p) not in vit_param_ids
+            ]
+            param_groups: Any = [
+                {"params": bilstm_params, "lr": self.config.learning_rate},
+                {"params": vit_trainable, "lr": self.config.learning_rate * self.config.vit_lr_scale},
+            ]
+            _logger.info(
+                "Differential LR — BiLSTM: %.2e  ViT fine-tune (%d params): %.2e",
+                self.config.learning_rate,
+                sum(p.numel() for p in vit_trainable),
+                self.config.learning_rate * self.config.vit_lr_scale,
+            )
+        else:
+            param_groups = model.parameters()
+
         self.optimizer = AdamW(
-            model.parameters(),
+            param_groups,
             lr=self.config.learning_rate,
             weight_decay=self.config.weight_decay,
         )
@@ -186,7 +214,11 @@ class TTSSTrainer:
         self.optimizer.zero_grad()
 
         device = next(self.model.parameters()).device
-        x, y = x.to(device), y.to(device)
+        if isinstance(x, (tuple, list)):
+            x = tuple(t.to(device) for t in x)
+        else:
+            x = x.to(device)
+        y = y.to(device)
 
         amp_ctx: Any = (
             torch.amp.autocast(device_type="cuda")

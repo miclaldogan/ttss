@@ -60,6 +60,7 @@ class VitSceneEncoder(nn.Module):
         image_size: int = 224,
         backend: str = "timm",
         freeze_backbone: bool = False,
+        num_unfreeze_blocks: int = 0,
         model: nn.Module | None = None,
     ) -> None:
         super().__init__()
@@ -70,6 +71,7 @@ class VitSceneEncoder(nn.Module):
         self.image_size = image_size
         self.backend = backend
         self.freeze_backbone = freeze_backbone
+        self.num_unfreeze_blocks = num_unfreeze_blocks
         self.model = model
 
     def load(self) -> None:
@@ -93,6 +95,10 @@ class VitSceneEncoder(nn.Module):
 
         if self.freeze_backbone:
             self.freeze()
+        elif self.num_unfreeze_blocks > 0:
+            self.partial_unfreeze(self.num_unfreeze_blocks)
+        else:
+            self.freeze()
 
     def freeze(self) -> None:
         """Freeze all backbone parameters (inference-only mode)."""
@@ -109,6 +115,46 @@ class VitSceneEncoder(nn.Module):
         for param in self.model.parameters():
             param.requires_grad_(True)
         self.model.train()
+
+    def partial_unfreeze(self, n_blocks: int) -> None:
+        """Freeze all params then unfreeze the last *n_blocks* transformer blocks + norm.
+
+        Frozen blocks run in eval mode for deterministic behaviour; unfrozen
+        blocks run in train mode so their dropout and layer-norm statistics
+        update during fine-tuning.
+        """
+        if self.model is None:
+            raise RuntimeError("Call load() before partial_unfreeze()")
+
+        for param in self.model.parameters():
+            param.requires_grad_(False)
+        self.model.eval()
+
+        if n_blocks <= 0:
+            return
+
+        if self.backend == "timm":
+            blocks = list(getattr(self.model, "blocks", []))
+            for block in blocks[-n_blocks:]:
+                for param in block.parameters():
+                    param.requires_grad_(True)
+                block.train()
+            norm = getattr(self.model, "norm", None)
+            if norm is not None:
+                for param in norm.parameters():
+                    param.requires_grad_(True)
+                norm.train()
+        elif self.backend == "transformers":
+            layers = list(self.model.encoder.layer)
+            for layer in layers[-n_blocks:]:
+                for param in layer.parameters():
+                    param.requires_grad_(True)
+                layer.train()
+            layernorm = getattr(self.model, "layernorm", None)
+            if layernorm is not None:
+                for param in layernorm.parameters():
+                    param.requires_grad_(True)
+                layernorm.train()
 
     def forward(self, frames: torch.Tensor) -> torch.Tensor:
         """Encode a batch of frames and return CLS embeddings of shape (B, 768)."""
@@ -132,7 +178,7 @@ class VitSceneEncoder(nn.Module):
     def preprocess_frames(self, frames: Sequence[Any] | torch.Tensor) -> torch.Tensor:
         """Convert raw frames to normalized tensors suitable for ViT input."""
         if isinstance(frames, torch.Tensor):
-            batch = frames.clone().detach().float()
+            batch = frames.float()
             if batch.ndim == 3:
                 batch = batch.unsqueeze(0)
         else:
@@ -153,8 +199,8 @@ class VitSceneEncoder(nn.Module):
             mode="bilinear",
             align_corners=False,
         )
-        mean = torch.tensor([0.485, 0.456, 0.406], dtype=batch.dtype).view(1, 3, 1, 1)
-        std = torch.tensor([0.229, 0.224, 0.225], dtype=batch.dtype).view(1, 3, 1, 1)
+        mean = torch.tensor([0.485, 0.456, 0.406], dtype=batch.dtype, device=batch.device).view(1, 3, 1, 1)
+        std = torch.tensor([0.229, 0.224, 0.225], dtype=batch.dtype, device=batch.device).view(1, 3, 1, 1)
         return (batch - mean) / std
 
     def encode_frame(self, frame: Any, frame_id: int = 0) -> SceneEmbedding:

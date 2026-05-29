@@ -1,6 +1,7 @@
 """Temporal Threat Scoring System (TTSS): model layer exports."""
 
 from ttss.models.detection.vit_scene import SceneEmbedding, VitSceneEncoder
+from ttss.models.end_to_end import EndToEndThreatModel
 from ttss.models.prediction.bilstm_threat import (
     BiLSTMThreatPredictor,
     BiLstmThreatPredictor,
@@ -14,6 +15,7 @@ __all__ = [
     "BiLstmThreatPredictor",
     "Detection",
     "DetectionBox",
+    "EndToEndThreatModel",
     "SceneEmbedding",
     "ThreatPrediction",
     "ThreatTimeline",

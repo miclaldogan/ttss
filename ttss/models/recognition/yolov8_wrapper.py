@@ -67,10 +67,10 @@ class YoloV8Wrapper:
 
     def __init__(
         self,
-        weights_path: str = "yolov8n.pt",
+        weights_path: str = "yolov8m.pt",
         device: str = "cpu",
         confidence_threshold: float = 0.25,
-        model_variant: str = "yolov8n",
+        model_variant: str = "yolov8m",
         focus_classes: Sequence[str] | None = None,
         max_detections: int = 20,
         model: Any | None = None,

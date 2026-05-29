@@ -8,7 +8,7 @@ import pathlib
 import torch
 import yaml
 
-from ttss.models.prediction.bilstm_threat import BiLSTMThreatPredictor
+from ttss.models.end_to_end import EndToEndThreatModel
 from ttss.training.trainer import TTSSTrainer, TrainerConfig
 
 
@@ -29,6 +29,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--epochs", type=int, default=None, help="Override epochs from config")
     parser.add_argument("--learning-rate", type=float, default=None, help="Override LR")
     parser.add_argument("--batch-size", type=int, default=None, help="Override batch size")
+    parser.add_argument(
+        "--vit-unfreeze-blocks", type=int, default=None,
+        help="Override number of ViT tail blocks to fine-tune (0 = fully frozen)",
+    )
     return parser
 
 
@@ -45,31 +49,51 @@ def main() -> None:
     args = build_parser().parse_args()
     cfg = _load_config(args.config)
     train_cfg = cfg.get("training", {})
+    model_cfg = cfg.get("model", {})
     log_cfg = cfg.get("logging", {})
 
+    device = train_cfg.get("device", "cuda" if torch.cuda.is_available() else "cpu")
+    num_unfreeze = args.vit_unfreeze_blocks if args.vit_unfreeze_blocks is not None \
+        else model_cfg.get("vit_unfreeze_blocks", 2)
+    use_yolo = model_cfg.get("use_yolo_features", True)
+
     config = TrainerConfig(
-        epochs=args.epochs or train_cfg.get("epochs", 20),
+        epochs=args.epochs or train_cfg.get("epochs", 30),
         learning_rate=args.learning_rate or train_cfg.get("learning_rate", 1e-4),
-        batch_size=args.batch_size or train_cfg.get("batch_size", 8),
+        batch_size=args.batch_size or train_cfg.get("batch_size", 4),
         weight_decay=train_cfg.get("weight_decay", 1e-5),
+        vit_lr_scale=train_cfg.get("vit_lr_scale", 0.1),
+        mixed_precision=train_cfg.get("mixed_precision", True),
         use_wandb=log_cfg.get("use_wandb", False),
         wandb_project=log_cfg.get("project", "ttss"),
         dry_run=args.dry_run,
     )
 
-    model = BiLSTMThreatPredictor(input_dim=1536)
+    print(f"Device: {device} | ViT unfreeze blocks: {num_unfreeze} | Mixed precision: {config.mixed_precision}")
+
+    model = EndToEndThreatModel.build(
+        num_unfreeze_blocks=num_unfreeze,
+        device=device,
+        use_yolo_features=use_yolo,
+    )
     trainer = TTSSTrainer(model, config)
 
-    # Synthetic data — used for dry-run and as a fallback
-    T, F = 16, 1536
+    # Synthetic data — shape matches the end-to-end model:
+    # x: (B, T, 3, 224, 224) preprocessed frames
+    # yolo_feats: (B, T, 8) pre-computed YOLO features  (packed into x as tuple)
+    # y: (B, T) threat score labels in [0, 1]
     B = config.batch_size
+    T = cfg.get("data", {}).get("clip_length", 64)
 
     def _synthetic_iter():
         while True:
-            yield (
-                torch.rand(B, T, F),
-                torch.rand(B, T),
-            )
+            frames = torch.rand(B, T, 3, 224, 224, device=device)
+            labels = torch.rand(B, T, device=device)
+            if use_yolo:
+                yolo_feats = torch.rand(B, T, 8, device=device)
+                yield (frames, yolo_feats), labels
+            else:
+                yield frames, labels
 
     result = trainer.fit(_synthetic_iter())
     print(f"train_loss={result.train_loss:.4f}")
@@ -78,4 +102,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

@@ -13,18 +13,27 @@ data:
   prepared_annotations_json: data/processed/UCF-Crime/ttss_annotations.json
   prepared_annotations_csv: data/processed/UCF-Crime/ttss_annotations.csv
   fps: 30
-  frame_stride: 4
-  clip_length: 32
+  frame_stride: 8
+  clip_length: 64
   pre_window: 90
   post_window: 90
   post_decay: 5.0
 
+model:
+  yolo_weights: yolov8m.pt
+  yolo_variant: yolov8m
+  vit_backend: timm
+  vit_unfreeze_blocks: 2
+  use_yolo_features: true
+
 training:
-  batch_size: 8
-  epochs: 20
+  batch_size: 4
+  epochs: 30
   learning_rate: 0.0001
   weight_decay: 0.00001
-  device: cpu
+  vit_lr_scale: 0.1
+  device: cuda
+  mixed_precision: true
 
 logging:
   use_wandb: false

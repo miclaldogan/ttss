@@ -99,6 +99,64 @@ class PreCrimeDetectionLoss(nn.Module):
         return masked_error.sum() / mask.float().sum()
 
 
+class MILRankingLoss(nn.Module):
+    """Multiple Instance Learning ranking loss (Sultani et al., CVPR 2018).
+
+    Forces the mean of the top-K anomaly scores to exceed the mean of the
+    top-K normal scores by at least *margin*.  This weakly-supervised signal
+    only needs video-level labels (anomaly vs normal) and is the primary
+    reason UCF-Crime SOTA methods reach 85-88% AUC.
+
+    Loss = max(0, margin − mean(topK anomaly scores) + mean(topK normal scores))
+         + λ_sparse * mean(anomaly_scores²)        # sparsity: few frames are truly anomalous
+         + λ_smooth * temporal_consistency(anomaly_scores)
+
+    Args:
+        margin:         Minimum gap between anomaly and normal top scores (default 0.1).
+        top_k:          Number of top-scoring frames to aggregate per bag.
+        lambda_sparse:  Weight for sparsity regularisation (default 8e-5).
+        lambda_smooth:  Weight for temporal smoothness regularisation (default 8e-5).
+    """
+
+    def __init__(
+        self,
+        margin: float = 0.1,
+        top_k: int = 3,
+        lambda_sparse: float = 8e-5,
+        lambda_smooth: float = 8e-5,
+    ) -> None:
+        super().__init__()
+        self.margin = margin
+        self.top_k = top_k
+        self.lambda_sparse = lambda_sparse
+        self.lambda_smooth = lambda_smooth
+        self._consistency = TemporalConsistencyLoss()
+
+    def forward(
+        self,
+        anomaly_scores: torch.Tensor,
+        normal_scores: torch.Tensor,
+    ) -> torch.Tensor:
+        """Compute MIL ranking loss.
+
+        Args:
+            anomaly_scores: (B_a, T) or (N_a,) scores for anomaly-labelled clips.
+            normal_scores:  (B_n, T) or (N_n,) scores for normal-labelled clips.
+        """
+        a_flat = anomaly_scores.reshape(-1)
+        n_flat = normal_scores.reshape(-1)
+
+        k_a = min(self.top_k, a_flat.numel())
+        k_n = min(self.top_k, n_flat.numel())
+        a_top = a_flat.topk(k_a).values.mean()
+        n_top = n_flat.topk(k_n).values.mean()
+
+        ranking = torch.clamp(self.margin - a_top + n_top, min=0.0)
+        sparsity = self.lambda_sparse * a_flat.pow(2).mean()
+        smoothness = self.lambda_smooth * self._consistency(anomaly_scores)
+        return ranking + sparsity + smoothness
+
+
 def mse_loss(predictions: Sequence[float], targets: Sequence[float]) -> float:
     """Compute mean squared error for scalar threat scores."""
     if len(predictions) != len(targets):

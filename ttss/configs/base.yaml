@@ -18,21 +18,30 @@ data:
   extract_dir: data/raw
   fps: 30
   video_extensions: [".avi", ".mp4", ".mov", ".mkv"]
-  frame_stride: 4
+  frame_stride: 8
   max_frames_per_video: null
-  clip_length: 32
+  clip_length: 64
   pre_window: 90
   post_window: 90
   post_decay: 5.0
   load_frames: true
   write_csv_index: true
 
+model:
+  yolo_weights: yolov8m.pt
+  yolo_variant: yolov8m
+  vit_backend: timm
+  vit_unfreeze_blocks: 2
+  use_yolo_features: true
+
 training:
-  batch_size: 8
-  epochs: 20
+  batch_size: 4
+  epochs: 30
   learning_rate: 0.0001
   weight_decay: 0.00001
-  device: cpu
+  vit_lr_scale: 0.1
+  device: cuda
+  mixed_precision: true
 
 logging:
   use_wandb: false
