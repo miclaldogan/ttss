@@ -44,6 +44,8 @@ class TrainerConfig:
     wandb_project: str = "ttss"
     checkpoint_dir: str = "checkpoints"
     mixed_precision: bool = True    # auto-disabled when not on CUDA
+    use_tensorboard: bool = False
+    tensorboard_dir: str = "runs/ttss"
     dry_run: bool = False
     dry_run_steps: int = 2
 
@@ -157,6 +159,15 @@ class TTSSTrainer:
             weight_decay=self.config.weight_decay,
         )
         self.scheduler = CosineAnnealingLR(self.optimizer, T_max=max(1, self.config.epochs))
+        self._global_step: int = 0
+        self._tb_writer: Any = None
+        if self.config.use_tensorboard:
+            try:
+                from torch.utils.tensorboard import SummaryWriter
+                self._tb_writer = SummaryWriter(log_dir=self.config.tensorboard_dir)
+                _logger.info("TensorBoard writer initialised at %s", self.config.tensorboard_dir)
+            except ImportError:
+                _logger.warning("tensorboard not installed — TB logging disabled")
         self._regression_loss = ThreatScoreRegressionLoss()
         self._consistency_loss = TemporalConsistencyLoss()
 
@@ -244,7 +255,11 @@ class TTSSTrainer:
             nn.utils.clip_grad_norm_(self.model.parameters(), self.config.max_grad_norm)
             self.optimizer.step()
 
-        return float(loss.detach().cpu().item())
+        step_loss = float(loss.detach().cpu().item())
+        if self._tb_writer is not None:
+            self._tb_writer.add_scalar("train/loss_step", step_loss, self._global_step)
+        self._global_step += 1
+        return step_loss
 
     # ------------------------------------------------------------------
     # Checkpoint helpers
@@ -335,10 +350,39 @@ class TTSSTrainer:
             avg_loss = epoch_loss / max(1, n_steps)
             epoch_losses.append(avg_loss)
             self.scheduler.step()
+            current_lr = self.optimizer.param_groups[0]["lr"]
 
-            metrics = {"train_loss": avg_loss, "epoch": epoch}
+            # Validation pass
+            val_loss = 0.0
+            if val_iter is not None:
+                val_device = next(self.model.parameters()).device
+                self.model.eval()
+                n_val = 0
+                with torch.no_grad():
+                    for x_val, y_val in val_iter:
+                        if isinstance(x_val, (tuple, list)):
+                            x_val = tuple(t.to(val_device) for t in x_val)
+                        else:
+                            x_val = x_val.to(val_device)
+                        y_val = y_val.to(val_device)
+                        result = self.model(x_val)
+                        preds = result.frame_scores if hasattr(result, "frame_scores") else result
+                        reg = self._regression_loss(preds, y_val)
+                        cons = self._consistency_loss(preds)
+                        val_loss += float((self.config.lambda1 * reg + self.config.lambda2 * cons).item())
+                        n_val += 1
+                val_loss = val_loss / max(1, n_val)
+                self.model.train()
+
+            metrics = {"train_loss": avg_loss, "val_loss": val_loss, "lr": current_lr, "epoch": epoch}
             self._log_wandb(metrics, step=epoch)
-            _logger.debug("epoch=%d train_loss=%.4f", epoch, avg_loss)
+            _logger.debug("epoch=%d train_loss=%.4f val_loss=%.4f lr=%.2e", epoch, avg_loss, val_loss, current_lr)
+
+            if self._tb_writer is not None:
+                self._tb_writer.add_scalar("train/loss_epoch", avg_loss, epoch)
+                self._tb_writer.add_scalar("train/lr", current_lr, epoch)
+                if val_iter is not None:
+                    self._tb_writer.add_scalar("val/loss", val_loss, epoch)
 
             # Save latest checkpoint every epoch
             self.save_checkpoint(
@@ -353,12 +397,15 @@ class TTSSTrainer:
         train_loss = epoch_losses[-1] if epoch_losses else 0.0
         if self._wandb_run is not None:
             self._wandb_run.finish()
+        if self._tb_writer is not None:
+            self._tb_writer.flush()
+            self._tb_writer.close()
 
         return TrainResult(
             train_loss=train_loss,
-            val_loss=0.0,
+            val_loss=val_loss if val_iter is not None else 0.0,
             best_val_auc=self._best_val_auc,
             epochs_completed=len(epoch_losses),
-            metrics={"train_loss": train_loss},
+            metrics={"train_loss": train_loss, "val_loss": val_loss if val_iter is not None else 0.0},
         )
 
