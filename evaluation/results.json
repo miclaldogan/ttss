@@ -1,0 +1,12 @@
+{
+  "checkpoint": null,
+  "timestamp": "2026-05-24T19:20:52.250048+00:00",
+  "threshold": 0.5,
+  "n_videos": 10,
+  "metrics": {
+    "frame_level_auc": 0.8091145833333334,
+    "early_alert_rate": 0.7226670989828884,
+    "mean_alert_lead_time_frames": 9.7,
+    "precrime_ap": 0.5754190021253306
+  }
+}

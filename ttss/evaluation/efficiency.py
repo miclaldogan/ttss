@@ -22,19 +22,62 @@ class LatencyResult:
     n_runs: int
 
 
-def count_parameters(model: nn.Module) -> dict[str, int]:
-    """Count parameters broken down by sub-module.
+def count_parameters(model: object) -> dict[str, int]:
+    """Count parameters broken down by component.
 
-    Returns a dict with keys ``total``, ``trainable``, and one entry per
-    named top-level child (e.g. ``recognition``, ``detection``, ``prediction``).
+    Works with both ``nn.Module`` subclasses and ``TtssPipeline`` (which is not
+    an ``nn.Module``).
+
+    Always returns at least ``{"total": int, "trainable": int}``.
+    For ``TtssPipeline`` and ``EndToEndThreatModel`` the canonical component
+    keys ``recognition``, ``detection``, and ``prediction`` are added.
+
+    Returns
+    -------
+    ``dict[str, int]`` — parameter counts per component.
     """
-    result: dict[str, int] = {
-        "total": sum(p.numel() for p in model.parameters()),
-        "trainable": sum(p.numel() for p in model.parameters() if p.requires_grad),
-    }
-    for name, child in model.named_children():
-        result[name] = sum(p.numel() for p in child.parameters())
-    return result
+    result: dict[str, int] = {}
+
+    # --- TtssPipeline (not nn.Module) ---
+    if hasattr(model, "recognition_model") and hasattr(model, "detection_model") and \
+            hasattr(model, "prediction_model") and not isinstance(model, nn.Module):
+        def _count(obj):
+            if isinstance(obj, nn.Module):
+                return sum(p.numel() for p in obj.parameters())
+            # YoloV8Wrapper wraps ultralytics YOLO — count via model attribute
+            inner = getattr(obj, "model", None)
+            if inner is not None and isinstance(inner, nn.Module):
+                return sum(p.numel() for p in inner.parameters())
+            return 0
+
+        rec = _count(model.recognition_model)
+        det = _count(model.detection_model)
+        pred = _count(model.prediction_model)
+        result = {
+            "total": rec + det + pred,
+            "trainable": rec + det + pred,
+            "recognition": rec,
+            "detection": det,
+            "prediction": pred,
+        }
+        return result
+
+    # --- nn.Module (EndToEndThreatModel, BiLSTM, ViT, etc.) ---
+    if isinstance(model, nn.Module):
+        result = {
+            "total": sum(p.numel() for p in model.parameters()),
+            "trainable": sum(p.numel() for p in model.parameters() if p.requires_grad),
+        }
+        for name, child in model.named_children():
+            # Map internal names to canonical keys
+            canonical = {"vit": "detection", "bilstm": "prediction",
+                         "recognition_model": "recognition",
+                         "detection_model": "detection",
+                         "prediction_model": "prediction"}.get(name, name)
+            result[canonical] = sum(p.numel() for p in child.parameters())
+        return result
+
+    return {"total": 0, "trainable": 0}
 
 
 def profile_forward(

@@ -109,6 +109,24 @@ class UcfCrimeDataset(Dataset):
                 a for a in all_annotations
                 if a.video_id in split_ids or a.video_path.split("/")[-1].replace(".mp4", "") in split_ids
             ]
+            # Validate that listed videos exist on disk when data_root has video files
+            data_root_path = Path(data_root)
+            if data_root_path.exists():
+                video_extensions = {".mp4", ".avi", ".mov", ".mkv"}
+                existing = {
+                    p.stem.replace("_x264", "")
+                    for p in data_root_path.rglob("*")
+                    if p.suffix.lower() in video_extensions
+                }
+                if existing:
+                    missing = split_ids - existing
+                    if missing:
+                        import warnings
+                        warnings.warn(
+                            f"{len(missing)} video IDs listed in split file not found under "
+                            f"{data_root_path}: {sorted(missing)[:5]}{'...' if len(missing) > 5 else ''}",
+                            UserWarning, stacklevel=2,
+                        )
 
         self.annotations = all_annotations
         self.data_root = Path(data_root)

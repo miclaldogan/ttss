@@ -250,6 +250,28 @@ class WilcoxonResult:
         return f"W={self.statistic:.2f}  p={self.p_value:.4f}  significant={sig}"
 
 
+def bonferroni_correction(p_values: list[float], alpha: float = 0.05) -> list[bool]:
+    """Apply Bonferroni correction for multiple comparisons.
+
+    Adjusts the significance threshold by dividing *alpha* by the number of
+    tests.  Each p-value is flagged as significant if ``p < alpha / n_tests``.
+
+    Parameters
+    ----------
+    p_values: Raw p-values from ``n_tests`` independent tests.
+    alpha:    Family-wise error rate (default 0.05).
+
+    Returns
+    -------
+    List of booleans; ``True`` means the test is significant after correction.
+    """
+    n = len(p_values)
+    if n == 0:
+        return []
+    threshold = alpha / n
+    return [p < threshold for p in p_values]
+
+
 def wilcoxon_test(
     scores_a: np.ndarray,
     scores_b: np.ndarray,

@@ -151,7 +151,7 @@ class RunConfig:
         default_factory=lambda: datetime.now(timezone.utc).isoformat(timespec="seconds")
     )
     python_version: str = field(default_factory=lambda: sys.version.split()[0])
-    torch_version: str = field(default_factory=lambda: torch.__version__)
+    torch_version: str = field(default_factory=lambda: str(torch.__version__))
     config_hash: str = ""
     training: dict[str, Any] = field(default_factory=dict)
     model: dict[str, Any] = field(default_factory=dict)

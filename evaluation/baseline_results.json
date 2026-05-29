@@ -1,0 +1,97 @@
+{
+  "split": "test",
+  "timestamp": "2026-05-24T19:48:54.452661+00:00",
+  "threshold": 0.5,
+  "results": [
+    {
+      "baseline": "sultani2018",
+      "video_id": "synthetic://video_000",
+      "frame_auc": 0.7917,
+      "early_alarm_rate": 0.0952
+    },
+    {
+      "baseline": "sultani2018",
+      "video_id": "synthetic://video_001",
+      "frame_auc": 1.0,
+      "early_alarm_rate": 0.0
+    },
+    {
+      "baseline": "sultani2018",
+      "video_id": "synthetic://video_002",
+      "frame_auc": 0.5156,
+      "early_alarm_rate": 0.3125
+    },
+    {
+      "baseline": "sultani2018",
+      "video_id": "synthetic://video_003",
+      "frame_auc": 0.8229,
+      "early_alarm_rate": 0.1667
+    },
+    {
+      "baseline": "sultani2018",
+      "video_id": "synthetic://video_004",
+      "frame_auc": 0.3542,
+      "early_alarm_rate": 0.0
+    },
+    {
+      "baseline": "rtfm",
+      "video_id": "synthetic://video_000",
+      "frame_auc": 0.7917,
+      "early_alarm_rate": 0.0952
+    },
+    {
+      "baseline": "rtfm",
+      "video_id": "synthetic://video_001",
+      "frame_auc": 1.0,
+      "early_alarm_rate": 0.0
+    },
+    {
+      "baseline": "rtfm",
+      "video_id": "synthetic://video_002",
+      "frame_auc": 0.5156,
+      "early_alarm_rate": 0.3125
+    },
+    {
+      "baseline": "rtfm",
+      "video_id": "synthetic://video_003",
+      "frame_auc": 0.8229,
+      "early_alarm_rate": 0.1667
+    },
+    {
+      "baseline": "rtfm",
+      "video_id": "synthetic://video_004",
+      "frame_auc": 0.3542,
+      "early_alarm_rate": 0.0
+    },
+    {
+      "baseline": "mean_feature_svm",
+      "video_id": "synthetic://video_000",
+      "frame_auc": 0.7917,
+      "early_alarm_rate": 0.0476
+    },
+    {
+      "baseline": "mean_feature_svm",
+      "video_id": "synthetic://video_001",
+      "frame_auc": 1.0,
+      "early_alarm_rate": 0.0
+    },
+    {
+      "baseline": "mean_feature_svm",
+      "video_id": "synthetic://video_002",
+      "frame_auc": 0.5156,
+      "early_alarm_rate": 0.3125
+    },
+    {
+      "baseline": "mean_feature_svm",
+      "video_id": "synthetic://video_003",
+      "frame_auc": 0.8229,
+      "early_alarm_rate": 0.1667
+    },
+    {
+      "baseline": "mean_feature_svm",
+      "video_id": "synthetic://video_004",
+      "frame_auc": 0.3542,
+      "early_alarm_rate": 0.0
+    }
+  ]
+}
