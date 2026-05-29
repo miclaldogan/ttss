@@ -58,7 +58,11 @@ def _load_video_frames(
     frame_stride: int,
     max_frames: int | None,
 ) -> tuple[list[int], list]:
-    """Extract frames from a video file using OpenCV."""
+    """Extract frames by sequential decode, keeping every frame_stride-th frame.
+
+    Sequential decode is more reliable than seeking for H264 surveillance videos
+    because seek positions can drift between keyframe boundaries.
+    """
     import cv2
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
@@ -68,6 +72,7 @@ def _load_video_frames(
     if max_frames:
         indices = indices[:max_frames]
     selected = set(indices)
+
     frames, collected = [], []
     idx = 0
     while True:
@@ -113,20 +118,16 @@ def extract_video(
     if not frames:
         raise RuntimeError(f"No frames extracted from {video_path}")
 
-    # YOLOv8m features
+    # YOLOv8m features — per frame (batching gives no speedup on RTX 4050)
+    from ttss.models.recognition.yolov8_wrapper import Detection
+    wrapper = _get_yolo_wrapper(yolo_model, device)
     yolo_feats = []
     for frame in frames:
         results = yolo_model.predict(source=frame, verbose=False, device=device)
-        from ttss.models.recognition.yolov8_wrapper import YoloV8Wrapper
-        # Re-use the wrapper's feature extraction
-        wrapper = _get_yolo_wrapper(yolo_model, device)
+        names = getattr(results[0], "names", {}) if results else {}
+        boxes = getattr(results[0], "boxes", None) if results else None
         detections = []
-        for result in results:
-            names = getattr(result, "names", {})
-            boxes = getattr(result, "boxes", None)
-            if boxes is None:
-                continue
-            from ttss.models.recognition.yolov8_wrapper import Detection
+        if boxes is not None:
             for cls_id, conf, xyxy in zip(
                 boxes.cls.detach().cpu().tolist(),
                 boxes.conf.detach().cpu().tolist(),
@@ -140,8 +141,7 @@ def extract_video(
                         xyxy=tuple(float(v) for v in xyxy),
                         frame_id=0, class_id=int(cls_id),
                     ))
-        feat = wrapper.extract_feature_tensor(detections)
-        yolo_feats.append(feat.numpy())
+        yolo_feats.append(wrapper.extract_feature_tensor(detections).numpy())
 
     # ViT-B/16 features — batch for efficiency
     import cv2
