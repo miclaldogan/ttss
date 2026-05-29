@@ -1,6 +1,7 @@
 """Temporal Threat Scoring System (TTSS): evaluation layer exports."""
 
 from ttss.evaluation.benchmark import BenchmarkRecord, BenchmarkRunner
+from ttss.evaluation.statistics import BootstrapResult, PermutationResult, PlattCalibrator, bootstrap_ci, permutation_test
 from ttss.evaluation.temporal_eval import (
     CategoryReport,
     EvaluationReport,
@@ -14,6 +15,11 @@ from ttss.evaluation.temporal_eval import (
 __all__ = [
     "BenchmarkRecord",
     "BenchmarkRunner",
+    "BootstrapResult",
+    "PermutationResult",
+    "PlattCalibrator",
+    "bootstrap_ci",
+    "permutation_test",
     "CategoryReport",
     "EvaluationReport",
     "TemporalEvaluationResult",
