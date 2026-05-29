@@ -17,6 +17,7 @@ import json
 import os
 import random
 import subprocess
+import sys
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -106,6 +107,12 @@ def _git_diff_hash() -> str:
         return "unknown"
 
 
+def _config_sha256(config: dict) -> str:
+    """Return a SHA-256 hash of the serialised config dict."""
+    serialised = json.dumps(config, sort_keys=True, default=str)
+    return hashlib.sha256(serialised.encode()).hexdigest()[:16]
+
+
 @dataclass
 class RunConfig:
     """Complete run specification for reproducibility logging.
@@ -143,6 +150,9 @@ class RunConfig:
     timestamp: str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat(timespec="seconds")
     )
+    python_version: str = field(default_factory=lambda: sys.version.split()[0])
+    torch_version: str = field(default_factory=lambda: torch.__version__)
+    config_hash: str = ""
     training: dict[str, Any] = field(default_factory=dict)
     model: dict[str, Any] = field(default_factory=dict)
     data: dict[str, Any] = field(default_factory=dict)
@@ -151,14 +161,17 @@ class RunConfig:
     @classmethod
     def from_yaml_config(cls, config: dict, experiment_name: str = "ttss-run", seed: int = 42) -> "RunConfig":
         """Build a RunConfig from the standard TTSS YAML config dict."""
-        return cls(
+        data_cfg = {k: v for k, v in config.get("data", {}).items()
+                    if k not in ("download_url", "archive_path")}
+        cfg = cls(
             experiment_name=experiment_name,
             seed=seed,
             training=config.get("training", {}),
             model=config.get("model", {}),
-            data={k: v for k, v in config.get("data", {}).items()
-                  if k not in ("download_url", "archive_path")},
+            data=data_cfg,
         )
+        cfg.config_hash = _config_sha256(config)
+        return cfg
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

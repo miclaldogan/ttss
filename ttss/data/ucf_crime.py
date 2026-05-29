@@ -88,17 +88,36 @@ class UcfCrimeDataset(Dataset):
         frame_stride: int = 1,
         max_frames: int | None = None,
         load_frames: bool = True,
+        split_file: str | Path | None = None,
     ) -> None:
         if frame_stride <= 0:
             raise ValueError("frame_stride must be a positive integer")
 
-        self.annotations = list(annotations)
+        all_annotations = list(annotations)
+
+        # Filter to split_file video IDs when provided
+        if split_file is not None:
+            split_path = Path(split_file)
+            if not split_path.exists():
+                raise FileNotFoundError(f"Split file not found: {split_path}")
+            split_ids = {
+                line.strip().split("/")[-1].replace("_x264.mp4", "").replace(".mp4", "")
+                for line in split_path.read_text().splitlines()
+                if line.strip()
+            }
+            all_annotations = [
+                a for a in all_annotations
+                if a.video_id in split_ids or a.video_path.split("/")[-1].replace(".mp4", "") in split_ids
+            ]
+
+        self.annotations = all_annotations
         self.data_root = Path(data_root)
         self.transform = transform
         self.labeler = labeler or TemporalThreatLabeler()
         self.frame_stride = frame_stride
         self.max_frames = max_frames
         self.load_frames = load_frames
+        self.split_file = split_file
 
     @classmethod
     def from_annotation_csv(
