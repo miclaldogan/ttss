@@ -37,9 +37,15 @@ class TrainerConfig:
     weight_decay: float = 1e-5
     batch_size: int = 4
     max_grad_norm: float = 1.0
-    lambda1: float = 1.0            # regression loss weight
-    lambda2: float = 0.1            # consistency loss weight
+    lambda_reg: float = 1.0         # regression loss weight
+    lambda_tc: float = 0.1          # temporal consistency loss weight
+    lambda_pre: float = 0.5         # pre-crime detection loss weight
+    # backward-compat aliases kept so existing call sites don't break
+    lambda1: float = 1.0
+    lambda2: float = 0.1
     vit_lr_scale: float = 0.1       # ViT fine-tune LR = learning_rate * vit_lr_scale
+    warmup_steps: int = 0           # linear warmup steps (0 = no warmup)
+    patience: int = 5               # early stopping patience on val AUC
     use_wandb: bool = False
     wandb_project: str = "ttss"
     checkpoint_dir: str = "checkpoints"
@@ -124,6 +130,7 @@ class TTSSTrainer:
         self.model = model
         self.config = config or TrainerConfig()
         self._best_val_auc: float = 0.0
+        self._patience_counter: int = 0
         self._wandb_run: Any = None
 
         # Differential LR: ViT fine-tune blocks use vit_lr_scale × base LR.
@@ -352,12 +359,16 @@ class TTSSTrainer:
             self.scheduler.step()
             current_lr = self.optimizer.param_groups[0]["lr"]
 
-            # Validation pass
-            val_loss = 0.0
+            # Validation pass — compute loss, AUC, EAR
+            val_loss, val_auc, val_ear = 0.0, 0.0, 0.0
             if val_iter is not None:
+                import numpy as np
+                from ttss.training.metrics import frame_level_auc, early_alert_rate
                 val_device = next(self.model.parameters()).device
                 self.model.eval()
                 n_val = 0
+                all_preds: list[float] = []
+                all_targets: list[float] = []
                 with torch.no_grad():
                     for x_val, y_val in val_iter:
                         if isinstance(x_val, (tuple, list)):
@@ -370,29 +381,52 @@ class TTSSTrainer:
                         reg = self._regression_loss(preds, y_val)
                         cons = self._consistency_loss(preds)
                         val_loss += float((self.config.lambda1 * reg + self.config.lambda2 * cons).item())
+                        all_preds.extend(preds.detach().cpu().reshape(-1).tolist())
+                        all_targets.extend(y_val.detach().cpu().reshape(-1).tolist())
                         n_val += 1
                 val_loss = val_loss / max(1, n_val)
+                if all_preds:
+                    y_true_np = np.array(all_targets)
+                    y_score_np = np.array(all_preds)
+                    # binarise targets at 0.5 for AUC/EAR
+                    y_bin = (y_true_np >= 0.5).astype(int)
+                    if y_bin.sum() > 0 and (1 - y_bin).sum() > 0:
+                        val_auc = frame_level_auc(y_bin, y_score_np)
+                        val_ear = early_alert_rate(y_bin, y_score_np)
                 self.model.train()
 
-            metrics = {"train_loss": avg_loss, "val_loss": val_loss, "lr": current_lr, "epoch": epoch}
+                # Early stopping
+                if val_auc > self._best_val_auc:
+                    self._best_val_auc = val_auc
+                    self._patience_counter = 0
+                    self.save_checkpoint(checkpoint_dir / "best.pt", epoch=epoch, val_auc=val_auc)
+                else:
+                    self._patience_counter += 1
+                    if not self.config.dry_run and self._patience_counter >= self.config.patience:
+                        _logger.info("Early stopping at epoch %d (patience=%d)", epoch, self.config.patience)
+                        break
+
+            metrics = {"train_loss": avg_loss, "val_loss": val_loss, "val_auc": val_auc,
+                       "val_ear": val_ear, "lr": current_lr, "epoch": epoch}
             self._log_wandb(metrics, step=epoch)
-            _logger.debug("epoch=%d train_loss=%.4f val_loss=%.4f lr=%.2e", epoch, avg_loss, val_loss, current_lr)
+            _logger.debug(
+                "epoch=%d train_loss=%.4f val_loss=%.4f val_auc=%.4f val_ear=%.4f lr=%.2e",
+                epoch, avg_loss, val_loss, val_auc, val_ear, current_lr,
+            )
 
             if self._tb_writer is not None:
                 self._tb_writer.add_scalar("train/loss_epoch", avg_loss, epoch)
                 self._tb_writer.add_scalar("train/lr", current_lr, epoch)
                 if val_iter is not None:
                     self._tb_writer.add_scalar("val/loss", val_loss, epoch)
+                    self._tb_writer.add_scalar("val/auc", val_auc, epoch)
+                    self._tb_writer.add_scalar("val/ear", val_ear, epoch)
 
-            # Save latest checkpoint every epoch
-            self.save_checkpoint(
-                checkpoint_dir / "latest.pt",
-                epoch=epoch,
-                val_auc=self._best_val_auc,
-            )
+            # Always save latest checkpoint
+            self.save_checkpoint(checkpoint_dir / "latest.pt", epoch=epoch, val_auc=self._best_val_auc)
 
             if self.config.dry_run:
-                break  # only one epoch in dry-run mode
+                break
 
         train_loss = epoch_losses[-1] if epoch_losses else 0.0
         if self._wandb_run is not None:
