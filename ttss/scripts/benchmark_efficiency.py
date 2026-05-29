@@ -17,6 +17,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from ttss.evaluation.efficiency import count_parameters, profile_forward, LatencyResult
 
 
 # ---------------------------------------------------------------------------
@@ -99,15 +100,15 @@ def _bench_bilstm(device: str, n_runs: int, T: int = 64) -> dict:
     from ttss.models.prediction.bilstm_threat import BiLSTMThreatPredictor
     model = BiLSTMThreatPredictor(input_dim=776).to(device).eval()
     x = torch.rand(1, T, 776, device=device)
-    params = sum(p.numel() for p in model.parameters())
-    with torch.no_grad():
-        ms = _bench(lambda: model(x), n_runs=n_runs, device=device)
+    lat = profile_forward(model, (1, T, 776), device=device, n_warmup=5, n_runs=n_runs, name=f"BiLSTM T={T}")
+    params = count_parameters(model)
     return {
         "name": f"BiLSTM (T={T})",
-        "ms_per_clip": ms,
-        "ms_per_frame": ms / T,
-        "fps": T * 1000 / ms,
-        "params_M": params / 1e6,
+        "ms_per_clip": lat.mean_ms,
+        "ms_per_frame": lat.mean_ms / T,
+        "p95_ms": lat.p95_ms / T,
+        "fps": lat.fps * T,
+        "params_M": params["total"] / 1e6,
     }
 
 
@@ -137,13 +138,14 @@ def _bench_end_to_end(device: str, n_runs: int, T: int = 64) -> dict:
 
 def _print_table(rows: list[dict]) -> None:
     print()
-    print(f"{'Component':<45} {'ms/frame':>10} {'FPS':>8} {'Params (M)':>12}")
-    print("-" * 80)
+    print(f"{'Component':<45} {'mean ms':>9} {'p95 ms':>8} {'FPS':>8} {'Params (M)':>12}")
+    print("-" * 86)
     for r in rows:
         ms = r.get("ms_per_frame", r.get("ms_per_clip", 0.0))
+        p95 = r.get("p95_ms_per_frame", r.get("p95_ms", ms))
         fps = r.get("fps", 0.0)
         params = r.get("params_M", r.get("trainable_params_M", 0.0))
-        print(f"{r['name']:<45} {ms:>10.2f} {fps:>8.1f} {params:>12.2f}")
+        print(f"{r['name']:<45} {ms:>9.2f} {p95:>8.2f} {fps:>8.1f} {params:>12.2f}")
     print()
 
 
@@ -187,11 +189,11 @@ def main() -> None:
 
     _print_table(rows)
 
-    if args.output:
-        Path(args.output).parent.mkdir(parents=True, exist_ok=True)
-        with open(args.output, "w") as f:
-            json.dump({"device": device, "n_runs": n_runs, "clip_length": T, "results": rows}, f, indent=2)
-        print(f"Results saved to {args.output}")
+    report_path = args.output or "evaluation/efficiency_report.json"
+    Path(report_path).parent.mkdir(parents=True, exist_ok=True)
+    with open(report_path, "w") as f:
+        json.dump({"device": device, "n_runs": n_runs, "clip_length": T, "results": rows}, f, indent=2)
+    print(f"Results saved → {report_path}")
 
 
 if __name__ == "__main__":
