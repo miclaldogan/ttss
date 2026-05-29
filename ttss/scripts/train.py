@@ -9,6 +9,7 @@ import torch
 import yaml
 
 from ttss.models.end_to_end import EndToEndThreatModel
+from ttss.training.reproducibility import RunConfig, save_run_config, seed_everything
 from ttss.training.trainer import TTSSTrainer, TrainerConfig
 
 
@@ -33,6 +34,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--vit-unfreeze-blocks", type=int, default=None,
         help="Override number of ViT tail blocks to fine-tune (0 = fully frozen)",
     )
+    parser.add_argument("--seed", type=int, default=42, help="Global random seed")
     return parser
 
 
@@ -52,6 +54,7 @@ def main() -> None:
     model_cfg = cfg.get("model", {})
     log_cfg = cfg.get("logging", {})
 
+    seed_everything(args.seed)
     device = train_cfg.get("device", "cuda" if torch.cuda.is_available() else "cpu")
     num_unfreeze = args.vit_unfreeze_blocks if args.vit_unfreeze_blocks is not None \
         else model_cfg.get("vit_unfreeze_blocks", 2)
@@ -69,7 +72,12 @@ def main() -> None:
         dry_run=args.dry_run,
     )
 
-    print(f"Device: {device} | ViT unfreeze blocks: {num_unfreeze} | Mixed precision: {config.mixed_precision}")
+    print(f"Device: {device} | ViT unfreeze blocks: {num_unfreeze} | Mixed precision: {config.mixed_precision} | Seed: {args.seed}")
+
+    run_cfg = RunConfig.from_yaml_config(cfg, experiment_name=cfg.get("experiment", {}).get("name", "ttss-run"), seed=args.seed)
+    out_dir = pathlib.Path(cfg.get("experiment", {}).get("output_dir", "outputs/ttss"))
+    save_run_config(run_cfg, out_dir / "run_config.yaml")
+    print(f"Run config saved → {out_dir / 'run_config.yaml'}  (git={run_cfg.git_commit})")
 
     model = EndToEndThreatModel.build(
         num_unfreeze_blocks=num_unfreeze,
