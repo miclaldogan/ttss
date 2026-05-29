@@ -119,40 +119,6 @@ def _synthetic_iter(B: int, T: int, F: int = 776, n_batches: int = 0):
             return
 
 
-# ---------------------------------------------------------------------------
-# MIL loss integration
-# ---------------------------------------------------------------------------
-
-
-def _make_train_step_with_mil(trainer: TTSSTrainer, mil_lambda: float = 1.0):
-    """Wrap TTSSTrainer.train_step to add MIL ranking loss."""
-    from ttss.training.losses import MILRankingLoss
-    mil_loss = MILRankingLoss(margin=0.1, top_k=3)
-
-    orig_step = trainer.train_step
-
-    def _step_with_mil(x: torch.Tensor, y: torch.Tensor) -> float:
-        # Standard regression + consistency loss
-        base_loss = orig_step(x, y)
-
-        # MIL ranking loss on last batch (anomaly vs normal split)
-        # y > 0.5 → anomaly clips; y ≤ 0.5 → normal clips
-        with torch.no_grad():
-            is_anom = y.max(dim=1).values > 0.5
-        if is_anom.any() and (~is_anom).any():
-            device = next(trainer.model.parameters()).device
-            x_dev = x.to(device)
-            trainer.model.eval()
-            with torch.no_grad():
-                result = trainer.model(x_dev)
-                preds = result.frame_scores if hasattr(result, "frame_scores") else result
-            trainer.model.train()
-            mil_val = float(mil_loss(preds[is_anom], preds[~is_anom]).item())
-            return base_loss + mil_lambda * mil_val
-        return base_loss
-
-    trainer.train_step = _step_with_mil  # type: ignore[method-assign]
-    return trainer
 
 
 # ---------------------------------------------------------------------------
@@ -181,21 +147,24 @@ def main() -> None:
                     else model_cfg.get("vit_unfreeze_blocks", 0))
 
     config = TrainerConfig(
-        epochs         = args.epochs       or train_cfg.get("epochs",        30),
-        learning_rate  = args.learning_rate or train_cfg.get("learning_rate", 1e-4),
-        batch_size     = args.batch_size   or train_cfg.get("batch_size",    8),
-        weight_decay   = train_cfg.get("weight_decay", 1e-5),
-        lambda_reg     = train_cfg.get("lambda_reg",   1.0),
-        lambda_tc      = train_cfg.get("lambda_tc",    0.1),
-        lambda1        = train_cfg.get("lambda_reg",   1.0),
-        lambda2        = train_cfg.get("lambda_tc",    0.1),
-        max_grad_norm  = train_cfg.get("grad_clip",    1.0),
-        patience       = train_cfg.get("patience",     5),
-        mixed_precision= train_cfg.get("mixed_precision", True),
-        use_wandb      = log_cfg.get("use_wandb",  False),
-        wandb_project  = log_cfg.get("project",    "ttss"),
-        checkpoint_dir = str(pathlib.Path(cfg.get("experiment", {}).get("output_dir", "outputs/ttss")) / "checkpoints"),
-        dry_run        = args.dry_run,
+        epochs          = args.epochs        or train_cfg.get("epochs",         30),
+        learning_rate   = args.learning_rate  or train_cfg.get("learning_rate",  1e-4),
+        batch_size      = args.batch_size    or train_cfg.get("batch_size",     8),
+        weight_decay    = train_cfg.get("weight_decay",    1e-5),
+        lambda_reg      = train_cfg.get("lambda_reg",      1.0),
+        lambda_tc       = train_cfg.get("lambda_tc",       0.1),
+        lambda_pre      = train_cfg.get("lambda_pre",      0.5),
+        lambda_mil      = train_cfg.get("lambda_mil",      1.0),
+        lambda1         = train_cfg.get("lambda_reg",      1.0),
+        lambda2         = train_cfg.get("lambda_tc",       0.1),
+        max_grad_norm   = train_cfg.get("grad_clip",       1.0),
+        patience        = train_cfg.get("patience",        5),
+        warmup_steps    = train_cfg.get("warmup_steps",    100),
+        mixed_precision = train_cfg.get("mixed_precision", True),
+        use_wandb       = log_cfg.get("use_wandb",  False),
+        wandb_project   = log_cfg.get("project",    "ttss"),
+        checkpoint_dir  = str(pathlib.Path(cfg.get("experiment", {}).get("output_dir", "outputs/ttss")) / "checkpoints"),
+        dry_run         = args.dry_run,
     )
 
     print(f"Device: {device}  |  Clip: {clip_length}  |  Batch: {config.batch_size}  |  Seed: {args.seed}")
@@ -213,12 +182,8 @@ def main() -> None:
     print(f"BiLSTM params: {total_params / 1e6:.2f}M")
 
     trainer = TTSSTrainer(model, config)
-
-    # Inject MIL loss
     if not args.dry_run:
-        mil_lambda = train_cfg.get("lambda_mil", 1.0)
-        trainer = _make_train_step_with_mil(trainer, mil_lambda=mil_lambda)
-        print(f"MIL ranking loss enabled (lambda={mil_lambda})")
+        print(f"MIL ranking loss: enabled (λ={config.lambda_mil})")
 
     # Data iterators
     features_dir = args.features_dir

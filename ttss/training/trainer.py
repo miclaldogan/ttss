@@ -8,6 +8,7 @@ import pathlib
 from dataclasses import dataclass, field
 from typing import Any, Iterator, Sequence
 
+import numpy as np
 import torch
 import torch.nn as nn
 from torch.optim import AdamW
@@ -15,6 +16,8 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 
 from ttss.models.ttss_pipeline import TtssPipeline
 from ttss.training.losses import (
+    MILRankingLoss,
+    PreCrimeDetectionLoss,
     TemporalConsistencyLoss,
     ThreatScoreRegressionLoss,
     composite_threat_loss,
@@ -37,19 +40,26 @@ class TrainerConfig:
     weight_decay: float = 1e-5
     batch_size: int = 4
     max_grad_norm: float = 1.0
+
+    # Loss weights
     lambda_reg: float = 1.0         # regression loss weight
     lambda_tc: float = 0.1          # temporal consistency loss weight
     lambda_pre: float = 0.5         # pre-crime detection loss weight
-    # backward-compat aliases kept so existing call sites don't break
+    lambda_mil: float = 1.0         # MIL ranking loss weight
+    use_mil_loss: bool = True        # MIL ranking loss (requires anomaly+normal in batch)
+
+    # Backward-compat aliases — stay in sync with lambda_reg/lambda_tc
     lambda1: float = 1.0
     lambda2: float = 0.1
+
     vit_lr_scale: float = 0.1       # ViT fine-tune LR = learning_rate * vit_lr_scale
-    warmup_steps: int = 0           # linear warmup steps (0 = no warmup)
+    warmup_steps: int = 100         # linear warmup steps (0 = no warmup)
     patience: int = 5               # early stopping patience on val AUC
+
     use_wandb: bool = False
     wandb_project: str = "ttss"
     checkpoint_dir: str = "checkpoints"
-    mixed_precision: bool = True    # auto-disabled when not on CUDA
+    mixed_precision: bool = True
     use_tensorboard: bool = False
     tensorboard_dir: str = "runs/ttss"
     dry_run: bool = False
@@ -114,16 +124,22 @@ class Trainer:
 
 
 class TTSSTrainer:
-    """Full-featured TTSS trainer with gradient clipping, LR scheduling,
-    mixed precision, checkpointing, and optional W&B logging.
+    """Full-featured TTSS trainer.
 
-    Architecture::
+    Loss::
 
-        optimizer  : AdamW
-        scheduler  : CosineAnnealingLR (T_max = epochs)
-        loss       : λ1 * ThreatScoreRegressionLoss + λ2 * TemporalConsistencyLoss
-        grad_clip  : max_norm = config.max_grad_norm
-        amp        : torch.amp.autocast (CPU-safe; only uses bfloat16 when CUDA)
+        L = λ_reg * Regression
+          + λ_tc  * TemporalConsistency
+          + λ_pre * PreCrimeDetection   (when precrime_mask provided)
+          + λ_mil * MILRanking          (when batch has anomaly + normal clips)
+
+    Scheduler::
+
+        CosineWarmupScheduler  (linear warmup then cosine decay)
+        — falls back to CosineAnnealingLR when warmup_steps == 0
+
+    AMP::
+        torch.amp.autocast on CUDA; no-op on CPU
     """
 
     def __init__(self, model: nn.Module, config: TrainerConfig | None = None) -> None:
@@ -133,9 +149,7 @@ class TTSSTrainer:
         self._patience_counter: int = 0
         self._wandb_run: Any = None
 
-        # Differential LR: ViT fine-tune blocks use vit_lr_scale × base LR.
-        # Detected by checking whether the model has a .vit attribute with
-        # trainable parameters (i.e. EndToEndThreatModel usage).
+        # Differential LR for EndToEndThreatModel (ViT blocks vs BiLSTM)
         vit_trainable = []
         vit_module = getattr(model, "vit", None)
         if vit_module is not None:
@@ -149,7 +163,7 @@ class TTSSTrainer:
             ]
             param_groups: Any = [
                 {"params": bilstm_params, "lr": self.config.learning_rate},
-                {"params": vit_trainable, "lr": self.config.learning_rate * self.config.vit_lr_scale},
+                {"params": vit_trainable,  "lr": self.config.learning_rate * self.config.vit_lr_scale},
             ]
             _logger.info(
                 "Differential LR — BiLSTM: %.2e  ViT fine-tune (%d params): %.2e",
@@ -165,48 +179,65 @@ class TTSSTrainer:
             lr=self.config.learning_rate,
             weight_decay=self.config.weight_decay,
         )
-        self.scheduler = CosineAnnealingLR(self.optimizer, T_max=max(1, self.config.epochs))
-        self._global_step: int = 0
-        self._tb_writer: Any = None
-        if self.config.use_tensorboard:
-            try:
-                from torch.utils.tensorboard import SummaryWriter
-                self._tb_writer = SummaryWriter(log_dir=self.config.tensorboard_dir)
-                _logger.info("TensorBoard writer initialised at %s", self.config.tensorboard_dir)
-            except ImportError:
-                _logger.warning("tensorboard not installed — TB logging disabled")
-        self._regression_loss = ThreatScoreRegressionLoss()
-        self._consistency_loss = TemporalConsistencyLoss()
 
+        # CosineWarmupScheduler when warmup requested; plain cosine otherwise
+        total_steps = max(1, self.config.epochs) * 200  # rough estimate
+        if self.config.warmup_steps > 0:
+            from ttss.training.scheduler import CosineWarmupScheduler
+            self.scheduler = CosineWarmupScheduler(
+                self.optimizer,
+                warmup_steps=self.config.warmup_steps,
+                total_steps=total_steps,
+                min_lr=self.config.learning_rate * 1e-2,
+            )
+        else:
+            self.scheduler = CosineAnnealingLR(self.optimizer, T_max=max(1, self.config.epochs))
+
+        # Loss modules
+        self._regression_loss  = ThreatScoreRegressionLoss()
+        self._consistency_loss = TemporalConsistencyLoss()
+        self._precrime_loss    = PreCrimeDetectionLoss(precrime_weight=2.0)
+        self._mil_loss         = MILRankingLoss(margin=0.1, top_k=3) if self.config.use_mil_loss else None
+
+        # AMP
         device = next(model.parameters()).device
         self._use_amp = self.config.mixed_precision and device.type == "cuda"
         self._scaler: torch.amp.GradScaler | None = (
             torch.amp.GradScaler() if self._use_amp else None
         )
 
+        # TensorBoard
+        self._global_step: int = 0
+        self._tb_writer: Any = None
+        if self.config.use_tensorboard:
+            try:
+                from torch.utils.tensorboard import SummaryWriter
+                self._tb_writer = SummaryWriter(log_dir=self.config.tensorboard_dir)
+                _logger.info("TensorBoard writer at %s", self.config.tensorboard_dir)
+            except ImportError:
+                _logger.warning("tensorboard not installed — TB logging disabled")
+
         _logger.info(
-            "TTSSTrainer initialised: epochs=%d lr=%g lambda1=%g lambda2=%g amp=%s",
-            self.config.epochs,
-            self.config.learning_rate,
-            self.config.lambda1,
-            self.config.lambda2,
-            self._use_amp,
+            "TTSSTrainer: epochs=%d lr=%.2e λ_reg=%.2f λ_tc=%.2f λ_pre=%.2f λ_mil=%.2f "
+            "warmup=%d amp=%s",
+            self.config.epochs, self.config.learning_rate,
+            self.config.lambda_reg, self.config.lambda_tc,
+            self.config.lambda_pre, self.config.lambda_mil,
+            self.config.warmup_steps, self._use_amp,
         )
 
     # ------------------------------------------------------------------
-    # W&B helpers
+    # W&B
     # ------------------------------------------------------------------
 
     def _init_wandb(self) -> None:
         if not self.config.use_wandb:
             return
         if os.environ.get("WANDB_MODE") == "disabled":
-            _logger.info("WANDB_MODE=disabled — skipping W&B initialisation")
             return
         try:
-            import wandb  # type: ignore[import]
+            import wandb
             self._wandb_run = wandb.init(project=self.config.wandb_project)
-            _logger.info("W&B run initialised: %s", self._wandb_run.name)
         except ImportError:
             _logger.warning("wandb not installed — logging disabled")
 
@@ -215,18 +246,24 @@ class TTSSTrainer:
             self._wandb_run.log(metrics, step=step)
 
     # ------------------------------------------------------------------
-    # Single training step
+    # Single training step — ALL losses computed inside the gradient pass
     # ------------------------------------------------------------------
 
-    def train_step(self, x: torch.Tensor, y: torch.Tensor) -> float:
-        """Run one forward + backward + optimiser step.
+    def train_step(
+        self,
+        x: torch.Tensor,
+        y: torch.Tensor,
+        precrime_mask: torch.Tensor | None = None,
+    ) -> float:
+        """Forward + backward + optimizer step.
 
         Args:
-            x: Input feature tensor ``(B, T, F)``.
-            y: Target threat scores ``(B, T)`` in ``[0, 1]``.
+            x:             ``(B, T, F)`` feature tensor.
+            y:             ``(B, T)`` target threat scores in [0, 1].
+            precrime_mask: Optional ``(B, T)`` bool mask for PreCrimeDetectionLoss.
 
         Returns:
-            Scalar loss value as a Python float.
+            Total scalar loss as a Python float.
         """
         self.model.train()
         self.optimizer.zero_grad()
@@ -237,19 +274,39 @@ class TTSSTrainer:
         else:
             x = x.to(device)
         y = y.to(device)
+        if precrime_mask is not None:
+            precrime_mask = precrime_mask.to(device)
 
         amp_ctx: Any = (
             torch.amp.autocast(device_type="cuda")
             if self._use_amp
             else torch.amp.autocast(device_type="cpu", enabled=False)
         )
+
         with amp_ctx:
             result = self.model(x)
-            # BiLSTMThreatPredictor returns ThreatPrediction with frame_scores (B,T)
             preds = result.frame_scores if hasattr(result, "frame_scores") else result
+
+            # Regression loss
             reg = self._regression_loss(preds, y)
+
+            # Temporal consistency loss
             cons = self._consistency_loss(preds)
-            loss = self.config.lambda1 * reg + self.config.lambda2 * cons
+
+            loss = self.config.lambda_reg * reg + self.config.lambda_tc * cons
+
+            # Pre-crime detection loss (when mask provided)
+            if precrime_mask is not None and self.config.lambda_pre > 0:
+                pre = self._precrime_loss(preds, y, precrime_mask)
+                loss = loss + self.config.lambda_pre * pre
+
+            # MIL ranking loss — inside the gradient graph so it actually trains
+            if self._mil_loss is not None and self.config.lambda_mil > 0:
+                # Infer anomaly/normal split from target labels
+                is_anom = y.max(dim=1).values > 0.5
+                if is_anom.any() and (~is_anom).any():
+                    mil = self._mil_loss(preds[is_anom], preds[~is_anom])
+                    loss = loss + self.config.lambda_mil * mil
 
         if self._scaler is not None:
             self._scaler.scale(loss).backward()
@@ -278,7 +335,6 @@ class TTSSTrainer:
         epoch: int,
         val_auc: float = 0.0,
     ) -> None:
-        """Save model state dict + training state to *path*."""
         path = pathlib.Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         torch.save(
@@ -300,11 +356,6 @@ class TTSSTrainer:
         model: nn.Module,
         config: TrainerConfig | None = None,
     ) -> "TTSSTrainer":
-        """Restore a trainer from a checkpoint file.
-
-        Returns a new :class:`TTSSTrainer` with the model and optimiser state
-        loaded from *path*.
-        """
         ckpt = torch.load(path, map_location="cpu", weights_only=True)
         trainer = cls(model, config)
         model.load_state_dict(ckpt["model_state_dict"])
@@ -313,9 +364,7 @@ class TTSSTrainer:
         trainer._best_val_auc = float(ckpt.get("val_auc", 0.0))
         _logger.info(
             "Checkpoint loaded from %s (epoch=%d val_auc=%.4f)",
-            path,
-            ckpt.get("epoch", -1),
-            trainer._best_val_auc,
+            path, ckpt.get("epoch", -1), trainer._best_val_auc,
         )
         return trainer
 
@@ -328,42 +377,50 @@ class TTSSTrainer:
         train_iter: Iterator[tuple[torch.Tensor, torch.Tensor]],
         val_iter: Iterator[tuple[torch.Tensor, torch.Tensor]] | None = None,
     ) -> TrainResult:
-        """Run the full training loop.
-
-        Args:
-            train_iter: Yields ``(x, y)`` tensor pairs per epoch.
-            val_iter:   Optional validation yields; used for AUC tracking.
-
-        Returns:
-            :class:`TrainResult` with final losses and best val AUC.
-        """
+        """Run the full training loop with warmup, early stopping, and all metrics."""
         self._init_wandb()
         checkpoint_dir = pathlib.Path(self.config.checkpoint_dir)
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
         epochs = self.config.dry_run_steps if self.config.dry_run else self.config.epochs
         epoch_losses: list[float] = []
+        val_loss = 0.0
 
         for epoch in range(epochs):
             epoch_loss = 0.0
             n_steps = 0
+            self.model.train()
             for x, y in train_iter:
                 step_loss = self.train_step(x, y)
                 epoch_loss += step_loss
                 n_steps += 1
+                # Step scheduler per-step when using warmup
+                if self.config.warmup_steps > 0:
+                    self.scheduler.step()
+                    # Per-step warmup scheduler update (runs after optimizer.step inside train_step)
+                if self.config.warmup_steps > 0:
+                    self.scheduler.step()
                 if self.config.dry_run and n_steps >= self.config.dry_run_steps:
                     break
 
             avg_loss = epoch_loss / max(1, n_steps)
             epoch_losses.append(avg_loss)
-            self.scheduler.step()
+
+            # Epoch-level scheduler step (CosineAnnealing without warmup)
+            if self.config.warmup_steps == 0:
+                self.scheduler.step()
+
             current_lr = self.optimizer.param_groups[0]["lr"]
 
-            # Validation pass — compute loss, AUC, EAR
-            val_loss, val_auc, val_ear = 0.0, 0.0, 0.0
+            # ----------------------------------------------------------
+            # Validation: loss + AUC + EAR + MALT + pre-crime AP
+            # ----------------------------------------------------------
+            val_loss, val_auc, val_ear, val_malt, val_precrime_ap = 0.0, 0.0, 0.0, 0.0, 0.0
             if val_iter is not None:
-                import numpy as np
-                from ttss.training.metrics import frame_level_auc, early_alert_rate
+                from ttss.training.metrics import (
+                    frame_level_auc, early_alert_rate,
+                    mean_alert_lead_time, precrime_ap,
+                )
                 val_device = next(self.model.parameters()).device
                 self.model.eval()
                 n_val = 0
@@ -378,24 +435,35 @@ class TTSSTrainer:
                         y_val = y_val.to(val_device)
                         result = self.model(x_val)
                         preds = result.frame_scores if hasattr(result, "frame_scores") else result
-                        reg = self._regression_loss(preds, y_val)
+                        reg  = self._regression_loss(preds, y_val)
                         cons = self._consistency_loss(preds)
-                        val_loss += float((self.config.lambda1 * reg + self.config.lambda2 * cons).item())
+                        val_loss += float(
+                            (self.config.lambda_reg * reg + self.config.lambda_tc * cons).item()
+                        )
                         all_preds.extend(preds.detach().cpu().reshape(-1).tolist())
                         all_targets.extend(y_val.detach().cpu().reshape(-1).tolist())
                         n_val += 1
                 val_loss = val_loss / max(1, n_val)
+
                 if all_preds:
                     y_true_np = np.array(all_targets)
                     y_score_np = np.array(all_preds)
-                    # binarise targets at 0.5 for AUC/EAR
                     y_bin = (y_true_np >= 0.5).astype(int)
                     if y_bin.sum() > 0 and (1 - y_bin).sum() > 0:
-                        val_auc = frame_level_auc(y_bin, y_score_np)
-                        val_ear = early_alert_rate(y_bin, y_score_np)
+                        val_auc  = frame_level_auc(y_bin, y_score_np)
+                        val_ear  = early_alert_rate(y_bin, y_score_np)
+                        val_malt = mean_alert_lead_time(y_bin, y_score_np)
+                        # pre-crime AP: frames before first anomaly onset
+                        onset_idx = np.where(y_bin == 1)[0]
+                        if len(onset_idx) > 0:
+                            onset = int(onset_idx[0])
+                            y_pre = np.zeros_like(y_bin)
+                            y_pre[:onset] = 1
+                            if y_pre.sum() > 0:
+                                val_precrime_ap = precrime_ap(y_pre, y_score_np)
+
                 self.model.train()
 
-                # Early stopping
                 if val_auc > self._best_val_auc:
                     self._best_val_auc = val_auc
                     self._patience_counter = 0
@@ -406,23 +474,30 @@ class TTSSTrainer:
                         _logger.info("Early stopping at epoch %d (patience=%d)", epoch, self.config.patience)
                         break
 
-            metrics = {"train_loss": avg_loss, "val_loss": val_loss, "val_auc": val_auc,
-                       "val_ear": val_ear, "lr": current_lr, "epoch": epoch}
+            metrics = {
+                "train_loss": avg_loss, "val_loss": val_loss,
+                "val_auc": val_auc, "val_ear": val_ear,
+                "val_malt": val_malt, "val_precrime_ap": val_precrime_ap,
+                "lr": current_lr, "epoch": epoch,
+            }
             self._log_wandb(metrics, step=epoch)
-            _logger.debug(
-                "epoch=%d train_loss=%.4f val_loss=%.4f val_auc=%.4f val_ear=%.4f lr=%.2e",
-                epoch, avg_loss, val_loss, val_auc, val_ear, current_lr,
+            _logger.info(
+                "epoch=%d  loss=%.4f  val_loss=%.4f  AUC=%.4f  EAR=%.4f  "
+                "MALT=%.1f  pre-AP=%.4f  lr=%.2e",
+                epoch, avg_loss, val_loss, val_auc, val_ear,
+                val_malt, val_precrime_ap, current_lr,
             )
 
             if self._tb_writer is not None:
                 self._tb_writer.add_scalar("train/loss_epoch", avg_loss, epoch)
                 self._tb_writer.add_scalar("train/lr", current_lr, epoch)
                 if val_iter is not None:
-                    self._tb_writer.add_scalar("val/loss", val_loss, epoch)
-                    self._tb_writer.add_scalar("val/auc", val_auc, epoch)
-                    self._tb_writer.add_scalar("val/ear", val_ear, epoch)
+                    self._tb_writer.add_scalar("val/loss",        val_loss,        epoch)
+                    self._tb_writer.add_scalar("val/auc",         val_auc,         epoch)
+                    self._tb_writer.add_scalar("val/ear",         val_ear,         epoch)
+                    self._tb_writer.add_scalar("val/malt",        val_malt,        epoch)
+                    self._tb_writer.add_scalar("val/precrime_ap", val_precrime_ap, epoch)
 
-            # Always save latest checkpoint
             self.save_checkpoint(checkpoint_dir / "latest.pt", epoch=epoch, val_auc=self._best_val_auc)
 
             if self.config.dry_run:
@@ -437,9 +512,12 @@ class TTSSTrainer:
 
         return TrainResult(
             train_loss=train_loss,
-            val_loss=val_loss if val_iter is not None else 0.0,
+            val_loss=val_loss,
             best_val_auc=self._best_val_auc,
             epochs_completed=len(epoch_losses),
-            metrics={"train_loss": train_loss, "val_loss": val_loss if val_iter is not None else 0.0},
+            metrics={
+                "train_loss": train_loss, "val_loss": val_loss,
+                "val_auc": val_auc, "val_ear": val_ear,
+                "val_malt": val_malt, "val_precrime_ap": val_precrime_ap,
+            },
         )
-

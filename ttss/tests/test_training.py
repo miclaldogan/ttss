@@ -114,8 +114,13 @@ def test_trainer_constructs():
 
 def test_trainer_scheduler_is_cosine():
     from torch.optim.lr_scheduler import CosineAnnealingLR
-    trainer = TTSSTrainer(_make_model(), _make_config())
-    assert isinstance(trainer.scheduler, CosineAnnealingLR)
+    from ttss.training.scheduler import CosineWarmupScheduler
+    # warmup_steps=0 → CosineAnnealingLR; warmup_steps>0 → CosineWarmupScheduler
+    trainer_no_warmup = TTSSTrainer(_make_model(), _make_config(warmup_steps=0))
+    assert isinstance(trainer_no_warmup.scheduler, CosineAnnealingLR)
+
+    trainer_warmup = TTSSTrainer(_make_model(), _make_config(warmup_steps=50))
+    assert isinstance(trainer_warmup.scheduler, CosineWarmupScheduler)
 
 
 # ---------------------------------------------------------------------------
