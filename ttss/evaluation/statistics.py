@@ -230,3 +230,55 @@ class PlattCalibrator:
     def fit_transform(self, scores: np.ndarray, labels: np.ndarray) -> np.ndarray:
         """Fit and return calibrated scores in one call."""
         return self.fit(scores, labels).transform(scores)
+
+
+# ---------------------------------------------------------------------------
+# Wilcoxon signed-rank test
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class WilcoxonResult:
+    """Output of :func:`wilcoxon_test`."""
+
+    statistic: float
+    p_value: float
+    significant: bool
+
+    def __str__(self) -> str:
+        sig = "✓" if self.significant else "✗"
+        return f"W={self.statistic:.2f}  p={self.p_value:.4f}  significant={sig}"
+
+
+def wilcoxon_test(
+    scores_a: np.ndarray,
+    scores_b: np.ndarray,
+    alpha: float = 0.05,
+    alternative: str = "two-sided",
+) -> WilcoxonResult:
+    """Paired Wilcoxon signed-rank test: H0 — A and B come from the same distribution.
+
+    Use on paired per-video metric values (e.g. per-video AUC from two models).
+    Reports a p-value with Bonferroni correction when called for multiple baselines.
+
+    Parameters
+    ----------
+    scores_a, scores_b: Paired per-video metric values (equal length).
+    alpha:              Significance level (default 0.05).
+    alternative:        ``'two-sided'``, ``'greater'``, or ``'less'``.
+    """
+    try:
+        from scipy.stats import wilcoxon as _wilcoxon
+    except ImportError as exc:
+        raise ImportError("scipy is required for wilcoxon_test — pip install scipy") from exc
+
+    scores_a = np.asarray(scores_a, dtype=float)
+    scores_b = np.asarray(scores_b, dtype=float)
+    if np.all(scores_a == scores_b):
+        return WilcoxonResult(statistic=0.0, p_value=1.0, significant=False)
+    result = _wilcoxon(scores_a, scores_b, alternative=alternative)
+    return WilcoxonResult(
+        statistic=float(result.statistic),
+        p_value=float(result.pvalue),
+        significant=float(result.pvalue) < alpha,
+    )
