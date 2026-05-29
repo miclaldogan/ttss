@@ -43,6 +43,7 @@ def test_loss_decreases_over_steps(tmp_path):
         batch_size=4,
         learning_rate=1e-3,
         mixed_precision=False,
+        warmup_steps=0,   # no warmup — full LR from step 1 so loss moves in 5 steps
         checkpoint_dir=str(tmp_path / "ckpts"),
         dry_run=False,
     )

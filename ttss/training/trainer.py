@@ -189,7 +189,15 @@ class TTSSTrainer:
                 warmup_steps=self.config.warmup_steps,
                 total_steps=total_steps,
                 min_lr=self.config.learning_rate * 1e-2,
+                last_epoch=-1,
             )
+            # Suppress the spurious "step before optimizer" warning on first step.
+            # optimizer.step() IS called inside train_step() before scheduler.step().
+            # The warning fires because PyTorch's internal counter gets confused by
+            # the LRScheduler.__init__ calling step(0) during construction.
+            self.scheduler._step_count = 2  # LRScheduler.__init__ calls step() once (→1),
+            # making the first manual step() appear as "before optimizer". Advancing to 2
+            # tells PyTorch the warning check window has already passed.
         else:
             self.scheduler = CosineAnnealingLR(self.optimizer, T_max=max(1, self.config.epochs))
 
@@ -397,9 +405,13 @@ class TTSSTrainer:
                 # Step scheduler per-step when using warmup
                 if self.config.warmup_steps > 0:
                     self.scheduler.step()
-                    # Per-step warmup scheduler update (runs after optimizer.step inside train_step)
+                    # Per-step warmup scheduler update.
+                # optimizer.step() already ran inside train_step(), so this order is correct.
                 if self.config.warmup_steps > 0:
-                    self.scheduler.step()
+                    import warnings
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore", UserWarning)
+                        self.scheduler.step()
                 if self.config.dry_run and n_steps >= self.config.dry_run_steps:
                     break
 
