@@ -2,10 +2,28 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Sequence
 
 import numpy as np
+
+UCF_CRIME_CATEGORIES: list[str] = [
+    "Abuse", "Arrest", "Arson", "Assault", "Burglary",
+    "Explosion", "Fighting", "RoadAccidents", "Robbery",
+    "Shooting", "Shoplifting", "Stealing", "Vandalism",
+]
+
+
+@dataclass
+class CategoryReport:
+    """Per-crime-category evaluation metrics."""
+
+    category: str
+    auc: float
+    ear: float
+    malt_frames: float
+    n_videos: int
+    precrime_ap: float = 0.0
 
 
 @dataclass(slots=True)
@@ -91,3 +109,68 @@ class TemporalEvaluator:
             lead_time_frames=0,
             detected_pre_crime=False,
         )
+
+
+def per_category_metrics(
+    results: dict[str, list[tuple[np.ndarray, np.ndarray]]],
+    threshold: float = 0.5,
+    fps: float = 30.0,
+) -> list[CategoryReport]:
+    """Compute AUC, EAR, MALT, and precrime-AP broken down by crime category.
+
+    Parameters
+    ----------
+    results:
+        Mapping from category name to a list of ``(y_true, y_score)`` pairs,
+        one per video.  ``y_true`` is 1 for crime frames, 0 otherwise.
+    threshold:
+        Alert decision threshold for EAR and MALT.
+    fps:
+        Frame rate used to convert MALT from frames to seconds (informational
+        only — ``malt_frames`` is always returned in frames).
+
+    Returns
+    -------
+    List of :class:`CategoryReport`, one per category present in *results*,
+    sorted by AUC descending.
+    """
+    from ttss.training.metrics import (
+        frame_level_auc,
+        early_alert_rate,
+        mean_alert_lead_time,
+        precrime_ap as _precrime_ap,
+    )
+
+    reports: list[CategoryReport] = []
+    for category, video_pairs in results.items():
+        if not video_pairs:
+            continue
+
+        aucs, ears, malts, aps = [], [], [], []
+        for y_true, y_score in video_pairs:
+            y_true = np.asarray(y_true)
+            y_score = np.asarray(y_score, dtype=float)
+
+            aucs.append(frame_level_auc(y_true, y_score))
+            ears.append(early_alert_rate(y_true, y_score, threshold))
+            malts.append(mean_alert_lead_time(y_true, y_score, threshold))
+
+            # pre-crime AP: label pre-crime frames as positive
+            onset_idx = np.where(y_true == 1)[0]
+            if len(onset_idx) > 0:
+                onset = int(onset_idx[0])
+                y_pre = np.zeros_like(y_true)
+                y_pre[:onset] = 1
+                aps.append(_precrime_ap(y_pre, y_score))
+
+        reports.append(CategoryReport(
+            category=category,
+            auc=float(np.mean(aucs)),
+            ear=float(np.mean(ears)),
+            malt_frames=float(np.mean(malts)),
+            n_videos=len(video_pairs),
+            precrime_ap=float(np.mean(aps)) if aps else 0.0,
+        ))
+
+    reports.sort(key=lambda r: r.auc, reverse=True)
+    return reports
