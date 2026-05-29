@@ -1,0 +1,114 @@
+[
+  {
+    "category": "Arrest",
+    "n_videos": 10,
+    "frame_auc": 0.6768,
+    "ear": 0.642,
+    "malt_frames": 148.6,
+    "precrime_ap": 0.6362
+  },
+  {
+    "category": "Assault",
+    "n_videos": 10,
+    "frame_auc": 0.6757,
+    "ear": 0.642,
+    "malt_frames": 149.0,
+    "precrime_ap": 0.6336
+  },
+  {
+    "category": "Vandalism",
+    "n_videos": 10,
+    "frame_auc": 0.6757,
+    "ear": 0.632,
+    "malt_frames": 149.2,
+    "precrime_ap": 0.6363
+  },
+  {
+    "category": "Explosion",
+    "n_videos": 10,
+    "frame_auc": 0.6748,
+    "ear": 0.658,
+    "malt_frames": 149.4,
+    "precrime_ap": 0.6333
+  },
+  {
+    "category": "Fighting",
+    "n_videos": 10,
+    "frame_auc": 0.6737,
+    "ear": 0.6567,
+    "malt_frames": 149.2,
+    "precrime_ap": 0.6341
+  },
+  {
+    "category": "Abuse",
+    "n_videos": 10,
+    "frame_auc": 0.6693,
+    "ear": 0.6473,
+    "malt_frames": 149.2,
+    "precrime_ap": 0.6385
+  },
+  {
+    "category": "Shooting",
+    "n_videos": 10,
+    "frame_auc": 0.668,
+    "ear": 0.6787,
+    "malt_frames": 148.9,
+    "precrime_ap": 0.6358
+  },
+  {
+    "category": "Shoplifting",
+    "n_videos": 10,
+    "frame_auc": 0.6669,
+    "ear": 0.6413,
+    "malt_frames": 149.3,
+    "precrime_ap": 0.6398
+  },
+  {
+    "category": "Burglary",
+    "n_videos": 10,
+    "frame_auc": 0.6566,
+    "ear": 0.6693,
+    "malt_frames": 149.1,
+    "precrime_ap": 0.6428
+  },
+  {
+    "category": "Arson",
+    "n_videos": 10,
+    "frame_auc": 0.6509,
+    "ear": 0.6653,
+    "malt_frames": 149.4,
+    "precrime_ap": 0.6435
+  },
+  {
+    "category": "RoadAccidents",
+    "n_videos": 10,
+    "frame_auc": 0.6506,
+    "ear": 0.6693,
+    "malt_frames": 149.3,
+    "precrime_ap": 0.6469
+  },
+  {
+    "category": "Robbery",
+    "n_videos": 10,
+    "frame_auc": 0.6422,
+    "ear": 0.6633,
+    "malt_frames": 148.9,
+    "precrime_ap": 0.6515
+  },
+  {
+    "category": "Stealing",
+    "n_videos": 10,
+    "frame_auc": 0.6238,
+    "ear": 0.668,
+    "malt_frames": 148.9,
+    "precrime_ap": 0.6611
+  },
+  {
+    "category": "_macro",
+    "n_videos": 130,
+    "frame_auc": 0.6619,
+    "ear": 0.6564,
+    "malt_frames": 149.11,
+    "precrime_ap": 0.0
+  }
+]
