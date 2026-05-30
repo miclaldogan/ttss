@@ -32,8 +32,12 @@ NORMAL_CATEGORIES = {"Normal_Videos", "Normal", "normal"}
 class FeatureSample:
     """One clip of pre-extracted features."""
 
-    features: torch.Tensor      # (T, 776) float32
+    features: torch.Tensor      # (T, yolo_dim+768) float32  — concatenated yolo+vmae
+    yolo: torch.Tensor          # (T, yolo_dim) float32  — YOLO object features
+    vit: torch.Tensor           # (T, 768) float32  — VideoMAE clip embeddings
+    flow: torch.Tensor          # (T, 16)  float32  — optical-flow features (zeros if absent)
     labels: torch.Tensor        # (T,) float32  — 0.0 or 1.0 (weak)
+    frame_indices: np.ndarray   # (T,) int32 — original video frame numbers
     video_id: str
     category: str
     is_anomaly: bool
@@ -80,32 +84,63 @@ class FeatureDataset(Dataset):
                 if _infer_category(f.stem) in self.categories
             ]
 
+        # Preload all .npz files into RAM to avoid repeated disk I/O each epoch
+        print(f"  Preloading {len(self._files)} feature files into RAM...", flush=True)
+        self._cache: list[tuple] = []
+        for f in self._files:
+            d = np.load(f, allow_pickle=True)
+            yolo_raw = d["yolo_features"].astype(np.float32)
+            T_raw = len(yolo_raw)
+            # Pad unenriched (8-dim) YOLO features to 32-dim with zeros
+            if yolo_raw.shape[1] < 32:
+                yolo_raw = np.pad(yolo_raw, ((0, 0), (0, 32 - yolo_raw.shape[1])))
+            # flow_features may be absent in pre-enrichment files — fall back to zeros
+            if "flow_features" in d.files:
+                flow_raw = d["flow_features"].astype(np.float32)
+            else:
+                flow_raw = np.zeros((T_raw, 16), dtype=np.float32)
+            self._cache.append((
+                yolo_raw,
+                d["vit_features"].astype(np.float32),
+                flow_raw,
+                d["frame_indices"].astype(np.int32),
+                str(d["video_id"]),
+                str(d["label"]),
+            ))
+        print(f"  Done preloading.", flush=True)
+
     def __len__(self) -> int:
         return len(self._files)
 
     def __getitem__(self, idx: int) -> FeatureSample:
-        path = self._files[idx]
-        data = np.load(path, allow_pickle=True)
+        yolo_raw, vit_raw, flow_raw, frame_indices_raw, video_id, label = self._cache[idx]
+        features_raw = np.concatenate([yolo_raw, vit_raw], axis=1)
 
-        yolo = data["yolo_features"].astype(np.float32)   # (T_raw, 8)
-        vit  = data["vit_features"].astype(np.float32)    # (T_raw, 768)
-        features_raw = np.concatenate([yolo, vit], axis=1)  # (T_raw, 776)
-
-        video_id = str(data["video_id"])
-        label    = str(data["label"])
         is_anomaly = label not in NORMAL_CATEGORIES
 
         T_raw = len(features_raw)
         features, n_frames = _clip_and_pad(features_raw, self.clip_length)
+        yolo, _            = _clip_and_pad(yolo_raw,     self.clip_length)
+        vit,  _            = _clip_and_pad(vit_raw,      self.clip_length)
+        flow, _            = _clip_and_pad(flow_raw,     self.clip_length)
 
-        # Weak label: 1.0 for all frames in anomaly video, 0.0 for normal
-        # (weakly supervised — frame-level labels not used during training)
+        # Clip/pad frame_indices the same way (pad with -1 to mark padding)
+        if T_raw >= self.clip_length:
+            frame_indices = frame_indices_raw[:self.clip_length].copy()
+        else:
+            pad = np.full(self.clip_length - T_raw, -1, dtype=np.int32)
+            frame_indices = np.concatenate([frame_indices_raw, pad])
+
         label_val = 1.0 if is_anomaly else 0.0
         labels = torch.full((self.clip_length,), label_val, dtype=torch.float32)
 
         return FeatureSample(
             features=features,
+            yolo=yolo,
+            vit=vit,
+            flow=flow,
             labels=labels,
+            frame_indices=frame_indices,
             video_id=video_id,
             category=label,
             is_anomaly=is_anomaly,
@@ -153,14 +188,28 @@ def _infer_category(video_id: str) -> str:
 
 
 def mil_collate_fn(samples: list[FeatureSample]) -> dict[str, torch.Tensor]:
-    """Stack samples into batched tensors, keeping anomaly/normal separate.
+    """Stack samples into batched tensors.
 
     Returns a dict with keys:
-        features  (B, T, 776)
-        labels    (B, T)
+        features   (B, T, yolo_dim+768)  — concatenated (backward compat)
+        yolo       (B, T, yolo_dim)      — YOLO object features
+        vit        (B, T, 768)           — VideoMAE clip embeddings
+        flow       (B, T, 16)            — optical-flow features
+        labels     (B, T)
         is_anomaly (B,) bool
+        frame_indices (B, T) int32
+        video_ids  list[str]
     """
-    features = torch.stack([s.features for s in samples])
-    labels   = torch.stack([s.labels   for s in samples])
-    is_anomaly = torch.tensor([s.is_anomaly for s in samples], dtype=torch.bool)
-    return {"features": features, "labels": labels, "is_anomaly": is_anomaly}
+    features      = torch.stack([s.features   for s in samples])
+    yolo          = torch.stack([s.yolo       for s in samples])
+    vit           = torch.stack([s.vit        for s in samples])
+    flow          = torch.stack([s.flow       for s in samples])
+    labels        = torch.stack([s.labels     for s in samples])
+    is_anomaly    = torch.tensor([s.is_anomaly for s in samples], dtype=torch.bool)
+    frame_indices = np.stack([s.frame_indices for s in samples])  # (B, T) int32
+    video_ids     = [s.video_id for s in samples]
+    return {
+        "features": features, "yolo": yolo, "vit": vit, "flow": flow,
+        "labels": labels, "is_anomaly": is_anomaly,
+        "frame_indices": frame_indices, "video_ids": video_ids,
+    }

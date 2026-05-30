@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 import pathlib
 from dataclasses import dataclass, field
@@ -13,6 +14,7 @@ import torch
 import torch.nn as nn
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
+from tqdm import tqdm
 
 from ttss.models.ttss_pipeline import TtssPipeline
 from ttss.training.losses import (
@@ -40,6 +42,9 @@ class TrainerConfig:
     weight_decay: float = 1e-5
     batch_size: int = 4
     max_grad_norm: float = 1.0
+    steps_per_epoch: int = 0   # 0 = use full dataset; set to len(ds)//batch_size
+    val_steps: int = 0          # 0 = unlimited (infinite loop bug!); set to len(val_ds)//batch_size
+    grad_accum_steps: int = 1   # gradient accumulation; effective batch = batch_size * grad_accum_steps
 
     # Loss weights
     lambda_reg: float = 1.0         # regression loss weight
@@ -53,6 +58,7 @@ class TrainerConfig:
     lambda2: float = 0.1
 
     vit_lr_scale: float = 0.1       # ViT fine-tune LR = learning_rate * vit_lr_scale
+    yolo_lr_scale: float = 1.0      # YOLO/flow branch LR = learning_rate * yolo_lr_scale (use >1 when fine-tuning on enriched data)
     warmup_steps: int = 100         # linear warmup steps (0 = no warmup)
     patience: int = 5               # early stopping patience on val AUC
 
@@ -64,6 +70,7 @@ class TrainerConfig:
     tensorboard_dir: str = "runs/ttss"
     dry_run: bool = False
     dry_run_steps: int = 2
+    val_annotations: str = ""   # path to test_annotations.json for frame-level GT
 
 
 @dataclass(slots=True)
@@ -155,21 +162,46 @@ class TTSSTrainer:
         if vit_module is not None:
             vit_trainable = [p for p in vit_module.parameters() if p.requires_grad]
 
+        # Detect YOLO/flow branch parameters for differential LR
+        yolo_modules = []
+        for name in ("yolo_gate", "yolo_residual"):
+            m = getattr(model, name, None)
+            if m is not None:
+                yolo_modules.append(m)
+        yolo_param_ids = {id(p) for m in yolo_modules for p in m.parameters()}
+
         if vit_trainable:
             vit_param_ids = {id(p) for p in vit_trainable}
             bilstm_params = [
                 p for p in model.parameters()
-                if p.requires_grad and id(p) not in vit_param_ids
+                if p.requires_grad and id(p) not in vit_param_ids and id(p) not in yolo_param_ids
             ]
-            param_groups: Any = [
+            param_groups_list: list[dict] = [
                 {"params": bilstm_params, "lr": self.config.learning_rate},
                 {"params": vit_trainable,  "lr": self.config.learning_rate * self.config.vit_lr_scale},
             ]
+            if yolo_param_ids:
+                yolo_params = [p for p in model.parameters() if p.requires_grad and id(p) in yolo_param_ids]
+                param_groups_list.append({"params": yolo_params, "lr": self.config.learning_rate * self.config.yolo_lr_scale})
+            param_groups: Any = param_groups_list
             _logger.info(
                 "Differential LR — BiLSTM: %.2e  ViT fine-tune (%d params): %.2e",
                 self.config.learning_rate,
                 sum(p.numel() for p in vit_trainable),
                 self.config.learning_rate * self.config.vit_lr_scale,
+            )
+        elif yolo_param_ids and self.config.yolo_lr_scale != 1.0:
+            yolo_params = [p for p in model.parameters() if p.requires_grad and id(p) in yolo_param_ids]
+            other_params = [p for p in model.parameters() if p.requires_grad and id(p) not in yolo_param_ids]
+            param_groups = [
+                {"params": other_params, "lr": self.config.learning_rate},
+                {"params": yolo_params,  "lr": self.config.learning_rate * self.config.yolo_lr_scale},
+            ]
+            _logger.info(
+                "Differential LR — base: %.2e  YOLO/flow branch (%d params): %.2e",
+                self.config.learning_rate,
+                sum(p.numel() for p in yolo_params),
+                self.config.learning_rate * self.config.yolo_lr_scale,
             )
         else:
             param_groups = model.parameters()
@@ -234,6 +266,23 @@ class TTSSTrainer:
             self.config.warmup_steps, self._use_amp,
         )
 
+        # Load frame-level test annotations for proper per-frame GT evaluation
+        self._anomaly_spans: dict[str, list[tuple[int, int]]] = {}
+        if self.config.val_annotations and os.path.exists(self.config.val_annotations):
+            import json
+            with open(self.config.val_annotations) as _f:
+                _ann_data = json.load(_f)
+            for _v in _ann_data["videos"]:
+                _spans = [
+                    (int(_s["start_frame"]), int(_s["end_frame"]))
+                    for _s in _v["anomaly_spans"]
+                    if int(_s["start_frame"]) >= 0
+                ]
+                self._anomaly_spans[_v["video_id"]] = _spans
+            _logger.info(
+                "Loaded frame-level annotations for %d test videos", len(self._anomaly_spans)
+            )
+
     # ------------------------------------------------------------------
     # W&B
     # ------------------------------------------------------------------
@@ -262,19 +311,22 @@ class TTSSTrainer:
         x: torch.Tensor,
         y: torch.Tensor,
         precrime_mask: torch.Tensor | None = None,
+        accumulate: bool = False,
     ) -> float:
-        """Forward + backward + optimizer step.
+        """Forward + backward + (optionally deferred) optimizer step.
 
         Args:
             x:             ``(B, T, F)`` feature tensor.
             y:             ``(B, T)`` target threat scores in [0, 1].
             precrime_mask: Optional ``(B, T)`` bool mask for PreCrimeDetectionLoss.
+            accumulate:    If True, skip the optimizer step (gradient accumulation).
 
         Returns:
             Total scalar loss as a Python float.
         """
         self.model.train()
-        self.optimizer.zero_grad()
+        if not accumulate:
+            self.optimizer.zero_grad()
 
         device = next(self.model.parameters()).device
         if isinstance(x, (tuple, list)):
@@ -291,41 +343,41 @@ class TTSSTrainer:
             else torch.amp.autocast(device_type="cpu", enabled=False)
         )
 
+        accum = self.config.grad_accum_steps
+
         with amp_ctx:
             result = self.model(x)
             preds = result.frame_scores if hasattr(result, "frame_scores") else result
 
-            # Regression loss
-            reg = self._regression_loss(preds, y)
-
-            # Temporal consistency loss
+            reg  = self._regression_loss(preds, y)
             cons = self._consistency_loss(preds)
-
             loss = self.config.lambda_reg * reg + self.config.lambda_tc * cons
 
-            # Pre-crime detection loss (when mask provided)
             if precrime_mask is not None and self.config.lambda_pre > 0:
                 pre = self._precrime_loss(preds, y, precrime_mask)
                 loss = loss + self.config.lambda_pre * pre
 
-            # MIL ranking loss — inside the gradient graph so it actually trains
             if self._mil_loss is not None and self.config.lambda_mil > 0:
-                # Infer anomaly/normal split from target labels
                 is_anom = y.max(dim=1).values > 0.5
                 if is_anom.any() and (~is_anom).any():
                     mil = self._mil_loss(preds[is_anom], preds[~is_anom])
                     loss = loss + self.config.lambda_mil * mil
 
+            # Scale loss for accumulation so gradients are averaged over accum steps
+            scaled_loss = loss / accum
+
         if self._scaler is not None:
-            self._scaler.scale(loss).backward()
-            self._scaler.unscale_(self.optimizer)
-            nn.utils.clip_grad_norm_(self.model.parameters(), self.config.max_grad_norm)
-            self._scaler.step(self.optimizer)
-            self._scaler.update()
+            self._scaler.scale(scaled_loss).backward()
+            if not accumulate:
+                self._scaler.unscale_(self.optimizer)
+                nn.utils.clip_grad_norm_(self.model.parameters(), self.config.max_grad_norm)
+                self._scaler.step(self.optimizer)
+                self._scaler.update()
         else:
-            loss.backward()
-            nn.utils.clip_grad_norm_(self.model.parameters(), self.config.max_grad_norm)
-            self.optimizer.step()
+            scaled_loss.backward()
+            if not accumulate:
+                nn.utils.clip_grad_norm_(self.model.parameters(), self.config.max_grad_norm)
+                self.optimizer.step()
 
         step_loss = float(loss.detach().cpu().item())
         if self._tb_writer is not None:
@@ -398,22 +450,31 @@ class TTSSTrainer:
             epoch_loss = 0.0
             n_steps = 0
             self.model.train()
-            for x, y in train_iter:
-                step_loss = self.train_step(x, y)
-                epoch_loss += step_loss
-                n_steps += 1
-                # Step scheduler per-step when using warmup
-                if self.config.warmup_steps > 0:
-                    self.scheduler.step()
-                    # Per-step warmup scheduler update.
-                # optimizer.step() already ran inside train_step(), so this order is correct.
-                if self.config.warmup_steps > 0:
+            total_steps = self.config.steps_per_epoch if self.config.steps_per_epoch > 0 else None
+            pbar = tqdm(train_iter, total=total_steps,
+                        desc=f"epoch {epoch}/{epochs-1}", unit="step", leave=True)
+            step_count = 0
+            accum = self.config.grad_accum_steps
+            self.optimizer.zero_grad()
+            for x, y in pbar:
+                step_count += 1
+                is_accum_step = (step_count % accum != 0)
+                step_loss = self.train_step(x, y, accumulate=is_accum_step)
+                if not math.isnan(step_loss):
+                    epoch_loss += step_loss
+                    n_steps += 1
+                pbar.set_postfix(loss=f"{step_loss:.4f}" if not math.isnan(step_loss) else "nan",
+                                 avg=f"{epoch_loss/n_steps:.4f}" if n_steps > 0 else "nan")
+                if not is_accum_step and self.config.warmup_steps > 0:
                     import warnings
                     with warnings.catch_warnings():
                         warnings.simplefilter("ignore", UserWarning)
                         self.scheduler.step()
-                if self.config.dry_run and n_steps >= self.config.dry_run_steps:
+                if self.config.dry_run and step_count >= self.config.dry_run_steps:
                     break
+                if self.config.steps_per_epoch > 0 and step_count >= self.config.steps_per_epoch:
+                    break
+            pbar.close()
 
             avg_loss = epoch_loss / max(1, n_steps)
             epoch_losses.append(avg_loss)
@@ -428,6 +489,7 @@ class TTSSTrainer:
             # Validation: loss + AUC + EAR + MALT + pre-crime AP
             # ----------------------------------------------------------
             val_loss, val_auc, val_ear, val_malt, val_precrime_ap = 0.0, 0.0, 0.0, 0.0, 0.0
+            val_acc, val_f1 = 0.0, 0.0
             if val_iter is not None:
                 from ttss.training.metrics import (
                     frame_level_auc, early_alert_rate,
@@ -438,8 +500,16 @@ class TTSSTrainer:
                 n_val = 0
                 all_preds: list[float] = []
                 all_targets: list[float] = []
+                all_frame_indices_flat: list[int] = []
+                all_video_ids_flat: list[str] = []
                 with torch.no_grad():
-                    for x_val, y_val in val_iter:
+                    for val_batch in val_iter:
+                        # Support both 2-tuple (x, y) and 4-tuple (x, y, fidx, vids)
+                        if len(val_batch) == 4:
+                            x_val, y_val, batch_fidx, batch_vids = val_batch
+                        else:
+                            x_val, y_val = val_batch
+                            batch_fidx, batch_vids = None, None
                         if isinstance(x_val, (tuple, list)):
                             x_val = tuple(t.to(val_device) for t in x_val)
                         else:
@@ -452,15 +522,42 @@ class TTSSTrainer:
                         val_loss += float(
                             (self.config.lambda_reg * reg + self.config.lambda_tc * cons).item()
                         )
-                        all_preds.extend(preds.detach().cpu().reshape(-1).tolist())
-                        all_targets.extend(y_val.detach().cpu().reshape(-1).tolist())
+                        flat_preds = preds.detach().cpu().reshape(-1).tolist()
+                        flat_targets = y_val.detach().cpu().reshape(-1).tolist()
+                        all_preds.extend(flat_preds)
+                        all_targets.extend(flat_targets)
+                        # Collect per-frame metadata for frame-level GT
+                        if batch_fidx is not None:
+                            T_cur = batch_fidx.shape[1]
+                            all_frame_indices_flat.extend(batch_fidx.reshape(-1).tolist())
+                            all_video_ids_flat.extend(
+                                [vid for vid in batch_vids for _ in range(T_cur)]
+                            )
                         n_val += 1
+                        if self.config.val_steps > 0 and n_val >= self.config.val_steps:
+                            break
                 val_loss = val_loss / max(1, n_val)
 
                 if all_preds:
                     y_true_np = np.array(all_targets)
                     y_score_np = np.array(all_preds)
-                    y_bin = (y_true_np >= 0.5).astype(int)
+
+                    # Build frame-level binary GT:
+                    # If we have frame_indices + annotation spans, use proper per-frame labels.
+                    # Otherwise fall back to clip-level label (all frames in anomaly clip = 1).
+                    if all_frame_indices_flat and self._anomaly_spans:
+                        y_bin = np.zeros(len(all_frame_indices_flat), dtype=int)
+                        for i, (fi, vid) in enumerate(
+                            zip(all_frame_indices_flat, all_video_ids_flat)
+                        ):
+                            if fi < 0:
+                                continue  # padding frame — stays 0
+                            for s, e in self._anomaly_spans.get(vid, []):
+                                if s <= fi <= e:
+                                    y_bin[i] = 1
+                                    break
+                    else:
+                        y_bin = (y_true_np >= 0.5).astype(int)
                     if y_bin.sum() > 0 and (1 - y_bin).sum() > 0:
                         val_auc  = frame_level_auc(y_bin, y_score_np)
                         val_ear  = early_alert_rate(y_bin, y_score_np)
@@ -473,6 +570,14 @@ class TTSSTrainer:
                             y_pre[:onset] = 1
                             if y_pre.sum() > 0:
                                 val_precrime_ap = precrime_ap(y_pre, y_score_np)
+
+                    from sklearn.metrics import roc_curve, f1_score, balanced_accuracy_score
+                    _fpr, _tpr, _thrs = roc_curve(y_bin, y_score_np)
+                    _j = _tpr - _fpr
+                    _best_thr = float(_thrs[np.argmax(_j)])
+                    y_pred_bin = (y_score_np >= _best_thr).astype(int)
+                    val_acc = float(balanced_accuracy_score(y_bin, y_pred_bin))
+                    val_f1  = float(f1_score(y_bin, y_pred_bin, zero_division=0))
 
                 self.model.train()
 
@@ -490,14 +595,15 @@ class TTSSTrainer:
                 "train_loss": avg_loss, "val_loss": val_loss,
                 "val_auc": val_auc, "val_ear": val_ear,
                 "val_malt": val_malt, "val_precrime_ap": val_precrime_ap,
+                "val_acc": val_acc, "val_f1": val_f1,
                 "lr": current_lr, "epoch": epoch,
             }
             self._log_wandb(metrics, step=epoch)
             _logger.info(
-                "epoch=%d  loss=%.4f  val_loss=%.4f  AUC=%.4f  EAR=%.4f  "
-                "MALT=%.1f  pre-AP=%.4f  lr=%.2e",
-                epoch, avg_loss, val_loss, val_auc, val_ear,
-                val_malt, val_precrime_ap, current_lr,
+                "epoch=%d  loss=%.4f  val_loss=%.4f  AUC=%.4f  bal_acc=%.4f  F1=%.4f  "
+                "EAR=%.4f  MALT=%.1f  pre-AP=%.4f  lr=%.2e",
+                epoch, avg_loss, val_loss, val_auc, val_acc, val_f1,
+                val_ear, val_malt, val_precrime_ap, current_lr,
             )
 
             if self._tb_writer is not None:
@@ -506,6 +612,8 @@ class TTSSTrainer:
                 if val_iter is not None:
                     self._tb_writer.add_scalar("val/loss",        val_loss,        epoch)
                     self._tb_writer.add_scalar("val/auc",         val_auc,         epoch)
+                    self._tb_writer.add_scalar("val/bal_acc",      val_acc,         epoch)
+                    self._tb_writer.add_scalar("val/f1",          val_f1,          epoch)
                     self._tb_writer.add_scalar("val/ear",         val_ear,         epoch)
                     self._tb_writer.add_scalar("val/malt",        val_malt,        epoch)
                     self._tb_writer.add_scalar("val/precrime_ap", val_precrime_ap, epoch)
@@ -531,5 +639,6 @@ class TTSSTrainer:
                 "train_loss": train_loss, "val_loss": val_loss,
                 "val_auc": val_auc, "val_ear": val_ear,
                 "val_malt": val_malt, "val_precrime_ap": val_precrime_ap,
+                "val_acc": val_acc, "val_f1": val_f1,
             },
         )

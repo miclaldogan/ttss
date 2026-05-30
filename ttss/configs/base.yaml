@@ -36,15 +36,19 @@ model:
 
 training:
   batch_size: 4
-  epochs: 30
-  learning_rate: 0.0001
+  epochs: 80
+  learning_rate: 0.00005
   weight_decay: 0.00001
   vit_lr_scale: 0.1
-  lambda_reg: 1.0
-  lambda_tc: 0.1
-  lambda_pre: 0.5
-  grad_clip: 1.0
-  patience: 5
+  yolo_lr_scale: 5.0
+  lambda_reg: 0.7
+  lambda_tc: 0.05
+  lambda_mil: 0.5
+  lambda_pre: 0.3
+  grad_clip: 0.3
+  grad_accum_steps: 4
+  warmup_steps: 100
+  patience: 20
   use_amp: true
   device: cuda
   mixed_precision: true

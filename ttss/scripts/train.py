@@ -23,6 +23,7 @@ Full workflow::
 from __future__ import annotations
 
 import argparse
+import logging
 import pathlib
 import random
 
@@ -30,7 +31,10 @@ import numpy as np
 import torch
 import yaml
 
+logging.basicConfig(level=logging.INFO, format="%(message)s")
+
 from ttss.models.prediction.bilstm_threat import BiLSTMThreatPredictor
+from ttss.models.fusion.object_scene_attention import ObjectConditionedThreatModel
 from ttss.training.reproducibility import RunConfig, save_run_config, seed_everything
 from ttss.training.trainer import TTSSTrainer, TrainerConfig
 
@@ -55,6 +59,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--learning-rate", type=float, default=None)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--vit-unfreeze-blocks", type=int, default=None)
+    parser.add_argument(
+        "--resume", metavar="CHECKPOINT", default=None,
+        help="Path to a .pt checkpoint. Loads model weights only; optimizer and "
+             "scheduler are reset so the new config's LR/epochs apply from epoch 0.",
+    )
     return parser
 
 
@@ -97,23 +106,64 @@ def _real_iter(
                    for i in range(len(ds))]
         sampler = WeightedRandomSampler(weights, num_samples=len(ds), replacement=True)
         loader = DataLoader(ds, batch_size=batch_size, sampler=sampler,
-                            collate_fn=mil_collate_fn, num_workers=2, pin_memory=True)
+                            collate_fn=mil_collate_fn, num_workers=4, pin_memory=True,
+                            persistent_workers=True)
     else:
         loader = DataLoader(ds, batch_size=batch_size, shuffle=shuffle,
-                            collate_fn=mil_collate_fn, num_workers=2, pin_memory=True)
+                            collate_fn=mil_collate_fn, num_workers=4, pin_memory=True,
+                            persistent_workers=True)
 
     while True:
         for batch in loader:
-            yield batch["features"], batch["labels"]
+            yield (batch["yolo"], batch["vit"], batch["flow"]), batch["labels"]
+
+
+def _real_val_iter(
+    features_dir: str,
+    clip_length: int,
+    batch_size: int,
+):
+    """Yield (x, labels, frame_indices, video_ids) 4-tuples for the test split.
+
+    Includes frame_indices and video_ids so the trainer can compute proper
+    frame-level evaluation using temporal annotations.
+    """
+    from ttss.data.feature_dataset import FeatureDataset, mil_collate_fn
+    from torch.utils.data import DataLoader
+
+    ds = FeatureDataset(features_dir, clip_length=clip_length, split="test")
+    if len(ds) == 0:
+        raise RuntimeError(
+            f"No .npz feature files found under {features_dir}/test/\n"
+            "Run: python -m ttss.scripts.extract_features --device cuda"
+        )
+    print(f"  test: {len(ds)} clips", flush=True)
+    loader = DataLoader(ds, batch_size=batch_size, shuffle=False,
+                        collate_fn=mil_collate_fn, num_workers=4, pin_memory=True,
+                        persistent_workers=True)
+    while True:
+        for batch in loader:
+            yield (
+                (batch["yolo"], batch["vit"], batch["flow"]),
+                batch["labels"],
+                batch["frame_indices"],
+                batch["video_ids"],
+            )
 
 
 def _synthetic_iter(B: int, T: int, F: int = 776, n_batches: int = 0):
-    """Synthetic iterator. Infinite when n_batches=0, finite otherwise."""
+    """Synthetic iterator. Infinite when n_batches=0, finite otherwise.
+
+    Yields 3-tuples (yolo, vmae, flow) matching the enriched feature dims.
+    F is ignored; kept for backward-compat signature only.
+    """
     count = 0
     while True:
-        x = torch.rand(B, T, F)
+        yolo = torch.rand(B, T, 32)
+        vmae = torch.rand(B, T, 768)
+        flow = torch.rand(B, T, 16)
         y = torch.cat([torch.zeros(B, T // 2), torch.rand(B, T - T // 2) * 0.8 + 0.2], dim=1)
-        yield x, y
+        yield (yolo, vmae, flow), y
         count += 1
         if n_batches > 0 and count >= n_batches:
             return
@@ -160,7 +210,10 @@ def main() -> None:
         max_grad_norm   = train_cfg.get("grad_clip",       1.0),
         patience        = train_cfg.get("patience",        5),
         warmup_steps    = train_cfg.get("warmup_steps",    100),
+        grad_accum_steps= train_cfg.get("grad_accum_steps", 1),
         mixed_precision = train_cfg.get("mixed_precision", True),
+        vit_lr_scale    = train_cfg.get("vit_lr_scale",    0.1),
+        yolo_lr_scale   = train_cfg.get("yolo_lr_scale",   1.0),
         use_wandb       = log_cfg.get("use_wandb",  False),
         wandb_project   = log_cfg.get("project",    "ttss"),
         checkpoint_dir  = str(pathlib.Path(cfg.get("experiment", {}).get("output_dir", "outputs/ttss")) / "checkpoints"),
@@ -175,13 +228,31 @@ def main() -> None:
     save_run_config(run_cfg, out_dir / "run_config.yaml")
     print(f"Run config → {out_dir / 'run_config.yaml'}  (git={run_cfg.git_commit})")
 
-    # Build model — BiLSTM only (ViT runs during feature extraction, not here)
-    # Features are pre-extracted: 8 (YOLO) + 768 (ViT) = 776 dims
-    model = BiLSTMThreatPredictor(input_dim=776).to(device)
+    # Object-Conditioned Cross-Attention + BiLSTM
+    # YOLO (8-dim) and VideoMAE (768-dim) are fused via bidirectional cross-attention
+    # before being fed to the BiLSTM threat predictor.
+    model = ObjectConditionedThreatModel(
+        yolo_dim=32, vmae_dim=768, flow_dim=16, hidden_dim=256,
+        num_heads=4, dropout=0.1,
+        bilstm_layers=2, bilstm_hidden=256,
+    ).to(device)
     total_params = sum(p.numel() for p in model.parameters())
     print(f"BiLSTM params: {total_params / 1e6:.2f}M")
 
     trainer = TTSSTrainer(model, config)
+
+    if args.resume:
+        ckpt_path = pathlib.Path(args.resume)
+        if not ckpt_path.exists():
+            raise FileNotFoundError(f"Resume checkpoint not found: {ckpt_path}")
+        ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=True)
+        model.load_state_dict(ckpt["model_state_dict"])
+        prev_auc = float(ckpt.get("val_auc", 0.0))
+        prev_epoch = int(ckpt.get("epoch", -1))
+        trainer._best_val_auc = prev_auc  # preserve baseline so only genuinely better checkpoints overwrite best.pt
+        print(f"Resumed model weights from {ckpt_path} "
+              f"(epoch={prev_epoch} val_auc={prev_auc:.4f}) — optimizer/scheduler reset")
+
     if not args.dry_run:
         print(f"MIL ranking loss: enabled (λ={config.lambda_mil})")
 
@@ -203,8 +274,25 @@ def main() -> None:
             print("  python -m ttss.scripts.extract_features --device cuda")
             return
 
+        from ttss.data.feature_dataset import FeatureDataset
+        _train_ds = FeatureDataset(features_dir, clip_length=clip_length, split="train")
+        steps_per_epoch = max(1, len(_train_ds) // B)
+        config.steps_per_epoch = steps_per_epoch
+        print(f"  steps_per_epoch={steps_per_epoch} ({len(_train_ds)} train clips, batch={B})")
+
+        _val_ds = FeatureDataset(features_dir, clip_length=clip_length, split="test")
+        config.val_steps = max(1, len(_val_ds) // B)
+
         train_it = _real_iter("train", features_dir, clip_length, B, shuffle=True)
-        val_it   = _real_iter("test",  features_dir, clip_length, B, shuffle=False)
+        val_it   = _real_val_iter(features_dir, clip_length, B)
+
+        # Frame-level annotations for proper evaluation
+        annotations_path = str(
+            pathlib.Path(features_dir).parent / "raw/UCF-Crime/annotations/test_annotations.json"
+        )
+        if pathlib.Path(annotations_path).exists():
+            config.val_annotations = annotations_path
+            print(f"  Frame-level annotations: {annotations_path}")
 
     result = trainer.fit(train_it, val_iter=val_it)
     print(f"\ntrain_loss={result.train_loss:.4f}  val_loss={result.val_loss:.4f}  "
