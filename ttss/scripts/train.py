@@ -231,8 +231,9 @@ def main() -> None:
     # Object-Conditioned Cross-Attention + BiLSTM
     # YOLO (8-dim) and VideoMAE (768-dim) are fused via bidirectional cross-attention
     # before being fed to the BiLSTM threat predictor.
+    vmae_dim = model_cfg.get("vmae_dim", 1024)  # 1024 for Large, 768 for Base
     model = ObjectConditionedThreatModel(
-        yolo_dim=32, vmae_dim=768, flow_dim=16, hidden_dim=256,
+        yolo_dim=32, vmae_dim=vmae_dim, flow_dim=16, hidden_dim=256,
         num_heads=4, dropout=0.1,
         bilstm_layers=2, bilstm_hidden=256,
     ).to(device)

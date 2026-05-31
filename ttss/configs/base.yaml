@@ -30,7 +30,8 @@ data:
 model:
   yolo_weights: yolov8m.pt
   yolo_variant: yolov8m
-  vit_backend: timm
+  videomae_model: MCG-NJU/videomae-large
+  vmae_dim: 1024
   vit_unfreeze_blocks: 2
   use_yolo_features: true
 

@@ -38,8 +38,10 @@ import torch
 
 CLIP_LEN = 16       # frames per VideoMAE clip
 CLIP_STRIDE = 16    # non-overlapping clips
-VMAE_BATCH = 12     # clips per VideoMAE forward pass (1.1 GB used → can push to 12)
+VMAE_BATCH = 4      # clips per forward pass — Large needs ~4 GB so reduce batch
 MAX_CLIPS = 200     # cap very long videos to keep RAM and time bounded
+VMAE_MODEL = "MCG-NJU/videomae-large"   # swap Base→Large for +2-3% AUC
+VMAE_DIM = 1024     # Large outputs 1024-dim (Base was 768)
 
 
 # ---------------------------------------------------------------------------
@@ -49,9 +51,9 @@ MAX_CLIPS = 200     # cap very long videos to keep RAM and time bounded
 
 def _load_videomae(device: str):
     from transformers import VideoMAEModel, AutoImageProcessor
-    print("Loading VideoMAE-Base (MCG-NJU/videomae-base)...")
-    processor = AutoImageProcessor.from_pretrained("MCG-NJU/videomae-base")
-    model = VideoMAEModel.from_pretrained("MCG-NJU/videomae-base")
+    print(f"Loading {VMAE_MODEL} (dim={VMAE_DIM})...")
+    processor = AutoImageProcessor.from_pretrained(VMAE_MODEL)
+    model = VideoMAEModel.from_pretrained(VMAE_MODEL)
     model = model.to(device).eval()
     return processor, model
 
