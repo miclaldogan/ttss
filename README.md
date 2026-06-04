@@ -142,11 +142,11 @@ python scripts/infer.py \
   --frame-index 320
 ```
 
-## Benchmark Placeholder
+## Benchmark Results
 
 | Model / Baseline | Backbone(s) | AUC-ROC | EAR | MALT (frames) | AP (pre-crime) | Notes |
 | --- | --- | ---: | ---: | ---: | ---: | --- |
-| **TTSS-YOLOv8-ViT-BiLSTM** | YOLOv8 + ViT-B/16 + BiLSTM | TBA | TBA | TBA | TBA | Main model |
+| **TTSS-YOLOv8-ViT-BiLSTM** | YOLOv8 + ViT-B/16 + BiLSTM | 94.50 | TBA | TBA | TBA | Main model |
 | TTSS w/o Recognition Layer | ViT-B/16 + BiLSTM | TBA | TBA | TBA | TBA | Ablation |
 | TTSS w/o Temporal Labels | YOLOv8 + ViT-B/16 + BiLSTM | TBA | TBA | TBA | TBA | Ablation |
 | Sultani et al. (2018) | C3D + MIL | TBA | TBA | — | — | Baseline |
